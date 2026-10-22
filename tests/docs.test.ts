@@ -113,7 +113,7 @@ describe("other documents", () => {
   test("the changelog starts with Unreleased, the release guide gives the order, and the forum post exists", () => {
     expect(read("CHANGELOG.md").startsWith("## Unreleased")).toBe(true);
     const release = read("docs/release.md").toLowerCase();
-    const order = ["**bump.**", "**candidate.**", "**manual run.**", "**record and screenshots.**", "**tag.**"].map((word) => release.indexOf(word));
+    const order = ["**checks.**", "**bump.**", "**changelog.**", "**package.**", "**publish.**"].map((word) => release.indexOf(word));
     expect(order.every((position) => position >= 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
     expect(read("docs/forum-post.md")).toContain("Share your Workflows");

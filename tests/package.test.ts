@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parse } from "plist";
 import { parse as parseYaml } from "yaml";
-import { bumpChangelog, bumpPackageJson } from "../scripts/bump-version";
+import { bumpChangelog, bumpPackageJson, nextVersion } from "../scripts/bump-version";
 import { blankExported, contentDigest, packageWorkflow } from "../scripts/package";
 import { zipFiles } from "../scripts/zip";
 
@@ -99,8 +99,18 @@ describe("version bump", () => {
   test("package.json and the changelog heading are updated, and a bad version or a missing heading is refused", () => {
     expect(bumpPackageJson('{\n  "name": "x",\n  "version": "0.1.0",\n  "type": "module"\n}', "0.2.0")).toContain('"version": "0.2.0"');
     expect(() => bumpPackageJson("{}", "v2")).toThrow("not a version");
-    expect(bumpChangelog("# Changelog\n\n## Unreleased\n\n- Added things\n", "0.2.0", "2026-10-22")).toBe("# Changelog\n\n## 0.2.0 — 2026-10-22\n\n- Added things\n");
+    expect(bumpChangelog("# Changelog\n\n## Unreleased\n\n- Added things\n", "0.2.0", "2026-10-22")).toBe("# Changelog\n\n## Unreleased\n\n## 0.2.0 — 2026-10-22\n\n- Added things\n");
     expect(() => bumpChangelog("# Changelog\n", "0.2.0", "2026-10-22")).toThrow("Unreleased");
+    expect(() => bumpChangelog("## Unreleased\n\n## 0.1.0 — 2026-10-22\n\n- Old\n", "0.2.0", "2026-10-23")).toThrow("nothing to release");
+  });
+
+  test("patch, minor, and major count up from the current version, and an exact version is used as given", () => {
+    expect(nextVersion("0.1.9", "patch")).toBe("0.1.10");
+    expect(nextVersion("0.1.9", "minor")).toBe("0.2.0");
+    expect(nextVersion("0.1.9", "major")).toBe("1.0.0");
+    expect(nextVersion("0.1.9", "2.0.1")).toBe("2.0.1");
+    expect(() => nextVersion("0.1.9", "huge")).toThrow("patch, minor, major");
+    expect(() => nextVersion("beta", "patch")).toThrow("not like 1.2.3");
   });
 });
 
@@ -117,18 +127,21 @@ describe("CI workflows", () => {
     expect(runs(ci.jobs.test)).toEqual(["bun install --frozen-lockfile", "bun run check", "bun test", "bun run build", "bun run plist", "git diff --exit-code -- Workflow", "bun run package"]);
   });
 
-  test("release runs on v* tags; the publish job needs verify, has contents write and GH_TOKEN, and uses no third-party release action", () => {
-    expect(release.on.push.tags).toEqual(["v*"]);
-    expect(release.jobs.publish.needs).toBe("verify");
-    expect(release.jobs.publish.permissions).toEqual({ contents: "write" });
-    expect(runs(release.jobs.verify)).toContain('bun run release:check "$GITHUB_REF_NAME" --no-qa');
-    expect(runs(release.jobs.verify).slice(0, 7)).toEqual(runs(ci.jobs.test).slice(0, 7));
-    const create = release.jobs.publish.steps.find((step: any) => String(step.run ?? "").includes("gh release create"));
-    expect(create.env.GH_TOKEN).toBe("${{ secrets.GITHUB_TOKEN }}");
-    expect(create.run).toBe('gh release create "$GITHUB_REF_NAME" dist/AI-Chat.alfredworkflow --verify-tag --notes-file dist/notes.md');
-    expect(runs(release.jobs.publish)).toContain('bun run release:check "$GITHUB_REF_NAME" --no-qa');
-    const uses = Object.values(release.jobs).flatMap((job: any) => job.steps.map((step: any) => step.uses).filter(Boolean));
+  test("release is a manual workflow on main that checks, bumps, commits, and publishes with the changelog notes", () => {
+    expect(Object.keys(release.on)).toEqual(["workflow_dispatch"]);
+    expect(release.on.workflow_dispatch.inputs.bump).toMatchObject({ type: "choice", default: "auto", options: ["auto", "patch", "minor", "major"] });
+    expect(release.concurrency["cancel-in-progress"]).toBe(false);
+    const job = release.jobs.release;
+    expect(job.if).toBe("github.ref == 'refs/heads/main'");
+    expect(job.permissions).toEqual({ contents: "write" });
+    expect(job.env.GH_TOKEN).toBe("${{ secrets.GITHUB_TOKEN }}");
+    const commands = runs(job);
+    expect(commands.slice(0, 6)).toEqual(runs(ci.jobs.test).slice(0, 6));
+    const order = ["bun run bump \"$kind\"", "bun run package", 'bun run release:check "$RELEASE_TAG" --no-qa', "git push origin HEAD:main", "gh release create"].map((word) => commands.findIndex((command: string) => command.includes(word)));
+    expect(order.every((position: number) => position >= 0)).toBe(true);
+    expect([...order].sort((x: number, y: number) => x - y)).toEqual(order);
+    expect(commands.find((command: string) => command.includes("gh release create"))).toBe('gh release create "$RELEASE_TAG" dist/AI-Chat.alfredworkflow --target "$(git rev-parse HEAD)" --title "AI Chat $RELEASE_TAG" --notes-file dist/notes.md');
+    const uses = job.steps.map((step: any) => step.uses).filter(Boolean);
     expect(uses.every((u: string) => u.startsWith("actions/") || u.startsWith("oven-sh/setup-bun"))).toBe(true);
-    expect(release.jobs.verify.permissions).toBeUndefined();
   });
 });

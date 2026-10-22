@@ -1,17 +1,25 @@
 # Releasing
 
-A release is a tag that points at code whose manual macOS checklist has been run and recorded. The checklist and its record (`docs/qa`) stay on the maintainer's machine and are not committed, so the maintainer checks them locally before tagging; CI checks the versions, the changelog, the tests, and the package.
+You release from GitHub: open **Actions → Release → Run workflow**, pick `main`, and choose what to release. Nothing is published by an ordinary push.
 
-## Order
+## What the workflow does
 
-1. **Bump.** `bun run bump <version>` sets `package.json`, renames `## Unreleased` in `CHANGELOG.md` to `## <version> — <date>`, and regenerates `Workflow/info.plist`. Commit the result. Add a fresh `## Unreleased` heading above it afterwards.
-2. **Candidate.** `bun run qa:candidate` builds the archive `dist/AI-Chat.alfredworkflow` and `dist/qa/probe.js`, and writes `docs/qa/v<version>.md` with every step `PENDING` (it never overwrites a record that already holds results).
-3. **Manual run.** Copy the archive and the probe to a Mac with macOS 14 or later and Alfred 5.5 or later. Install the workflow and work through `docs/qa/checklist.md` by hand.
-4. **Record and screenshots.** In `docs/qa/v<version>.md` set every step to `PASS` or `FAIL`, fill in the tester and date, and save the screenshots named in `docs/qa/screenshots.json` under `Workflow/images/about/` at the listed width. Run `bun run qa:verify <version>`; it checks every step, the screenshots, and that the record's content digest still matches the archive. Any code change after the manual run changes the digest, so run the checklist again. Commit the record and the screenshots.
-5. **Check locally.** `bun run release:check v<version>` also checks the QA record, which is kept out of the repository, so CI cannot. Do not tag until it passes.
-6. **Tag.** `git tag v<version>` on that commit and `git push origin v<version>`. The `Release` workflow runs the full checks and `bun run release:check --no-qa`, and only then publishes the `.alfredworkflow` asset with the changelog notes.
+1. **Checks.** Typecheck, tests, build, the stale `Workflow/` check.
+2. **Bump.** The `bump` input picks the version. `auto` (the default) releases the version in `package.json` as it is if it was never released, and otherwise counts the patch up; `patch`, `minor`, and `major` count up from the current version.
+3. **Changelog.** `## Unreleased` in `CHANGELOG.md` becomes `## <version> — <date>`, with a fresh, empty `## Unreleased` above it. An empty `## Unreleased` stops the run, so write the notes there as you work.
+4. **Package.** It builds `AI-Chat.alfredworkflow` and writes the release notes from that version's changelog section.
+5. **Publish.** It commits `package.json`, `CHANGELOG.md`, and `Workflow/info.plist` to `main` as `release: v<version>`, then creates the tag and the GitHub release with the archive and the notes.
 
-If the verify job fails, nothing is published. Fix the problem, delete the tag (`git push origin :refs/tags/v<version>` and `git tag -d v<version>`), and tag again.
+If a run fails before the commit, nothing changed. If it fails after the commit, run it again with `auto`: the version is already bumped, so it only publishes. If `main` protects pushes from `github-actions[bot]`, allow the bot, or the commit step fails.
+
+## Checking by hand (optional)
+
+The manual macOS checklist and its record live in `docs/qa` on your machine and are not committed, so CI never checks them. When you want that gate, run it before you start the workflow:
+
+1. `bun run qa:candidate` builds the archive and writes `docs/qa/v<version>.md` with every step `PENDING`.
+2. Install the archive on a Mac with macOS 14+ and Alfred 5.5+ and work through `docs/qa/checklist.md`.
+3. Set every step to `PASS` or `FAIL` in the record, fill in the tester and date, and run `bun run qa:verify <version>`.
+4. `bun run release:check v<version>` also checks the record against the archive.
 
 ## Alfred Gallery
 

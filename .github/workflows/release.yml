@@ -1,13 +1,33 @@
 name: Release
 
+# Run it by hand (Actions, Release, Run workflow, branch main) when you want to release. It checks the code, picks the
+# next version, moves "## Unreleased" in CHANGELOG.md under it, commits that to main, and publishes a GitHub release
+# with the .alfredworkflow and that version's notes. Nothing runs on an ordinary push.
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version to release: auto releases the version in package.json if it was never released, otherwise bumps the patch"
+        type: choice
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+        default: auto
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  verify:
+  release:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
@@ -20,25 +40,31 @@ jobs:
       - run: bun run plist
       - name: Fail when the committed Workflow files are stale
         run: git diff --exit-code -- Workflow
-      - run: bun run package
-      - name: Check the tag, versions, and changelog
-        run: bun run release:check "$GITHUB_REF_NAME" --no-qa
-
-  publish:
-    needs: verify
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: ".bun-version"
-      - run: bun install --frozen-lockfile
-      - run: bun run package
-      - name: Rebuild the release notes and check them again
-        run: bun run release:check "$GITHUB_REF_NAME" --no-qa
-      - name: Create the release
+      - name: Bump the version
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "$GITHUB_REF_NAME" dist/AI-Chat.alfredworkflow --verify-tag --notes-file dist/notes.md
+          BUMP: ${{ inputs.bump }}
+        run: |
+          current="$(jq -r .version package.json)"
+          kind="$BUMP"
+          if [ "$kind" = "auto" ]; then
+            if git ls-remote --exit-code --tags origin "refs/tags/v$current" > /dev/null; then kind=patch; else kind="$current"; fi
+          fi
+          bun run bump "$kind"
+          version="$(jq -r .version package.json)"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null; then
+            echo "v$version is already released" >&2
+            exit 1
+          fi
+          echo "RELEASE_TAG=v$version" >> "$GITHUB_ENV"
+      - run: bun run package
+      - name: Write the release notes from the changelog
+        run: bun run release:check "$RELEASE_TAG" --no-qa
+      - name: Commit the bump to main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json CHANGELOG.md Workflow/info.plist
+          git diff --cached --quiet || git commit -m "release: $RELEASE_TAG"
+          git push origin HEAD:main
+      - name: Create the release and its tag
+        run: gh release create "$RELEASE_TAG" dist/AI-Chat.alfredworkflow --target "$(git rev-parse HEAD)" --title "AI Chat $RELEASE_TAG" --notes-file dist/notes.md

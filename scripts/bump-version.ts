@@ -10,23 +10,44 @@ export function bumpPackageJson(text: string, version: string): string {
   return next;
 }
 
-// "## Unreleased" becomes "## <version> — <date>"; the notes under it are the release notes.
+// A version like 1.2.3 is used as given; patch, minor, and major count up from the current one.
+export function nextVersion(current: string, kind: string): string {
+  if (/^\d+\.\d+\.\d+$/.test(kind)) return kind;
+  const parts = /^(\d+)\.(\d+)\.(\d+)$/.exec(current);
+  if (!parts) throw new Error(`The current version "${current}" is not like 1.2.3`);
+  const [major, minor, patch] = [Number(parts[1]), Number(parts[2]), Number(parts[3])];
+  if (kind === "major") return `${major + 1}.0.0`;
+  if (kind === "minor") return `${major}.${minor + 1}.0`;
+  if (kind === "patch") return `${major}.${minor}.${patch + 1}`;
+  throw new Error(`"${kind}" is not patch, minor, major, or a version like 1.2.3`);
+}
+
+// "## Unreleased" becomes "## <version> — <date>", with a fresh, empty "## Unreleased" above it; the notes are the release notes.
 export function bumpChangelog(text: string, version: string, date: string): string {
-  if (!/^## Unreleased[ \t]*$/m.test(text)) throw new Error("CHANGELOG.md has no `## Unreleased` heading to release");
-  return text.replace(/^## Unreleased[ \t]*$/m, `## ${version} — ${date}`);
+  const heading = /^## Unreleased[ \t]*$/m.exec(text);
+  if (!heading) throw new Error("CHANGELOG.md has no `## Unreleased` heading to release");
+  const rest = text.slice(heading.index + heading[0].length);
+  const next = rest.search(/^## /m);
+  if ((next < 0 ? rest : rest.slice(0, next)).trim() === "") throw new Error("CHANGELOG.md has no notes under `## Unreleased`, so there is nothing to release");
+  return text.replace(/^## Unreleased[ \t]*$/m, `## Unreleased\n\n## ${version} — ${date}`);
 }
 
 if (import.meta.main) {
-  const version = process.argv[2];
-  if (!version) {
-    console.error("usage: bun run bump <version>");
+  const kind = process.argv[2];
+  if (!kind) {
+    console.error("usage: bun run bump <patch | minor | major | 1.2.3>");
     process.exit(2);
   }
   const date = new Date().toISOString().slice(0, 10);
   const packagePath = resolve(root, "package.json");
   const changelogPath = resolve(root, "CHANGELOG.md");
-  writeFileSync(packagePath, bumpPackageJson(readFileSync(packagePath, "utf8"), version));
-  writeFileSync(changelogPath, bumpChangelog(readFileSync(changelogPath, "utf8"), version, date));
+  const packageText = readFileSync(packagePath, "utf8");
+  const version = nextVersion((JSON.parse(packageText) as { version: string }).version, kind);
+  writeFileSync(packagePath, bumpPackageJson(packageText, version));
+  const changelog = readFileSync(changelogPath, "utf8");
+  // A changelog that already has this version was bumped by an earlier run that did not finish publishing.
+  const alreadyBumped = new RegExp(`^## ${version.replace(/\./g, "\\.")}( — \\d{4}-\\d{2}-\\d{2})?\\s*$`, "m").test(changelog);
+  if (!alreadyBumped) writeFileSync(changelogPath, bumpChangelog(changelog, version, date));
   const { renderPlist } = await import("./workflow");
   writeFileSync(resolve(root, "Workflow/info.plist"), renderPlist());
   console.log(`version ${version}: package.json, CHANGELOG.md, and Workflow/info.plist updated`);
