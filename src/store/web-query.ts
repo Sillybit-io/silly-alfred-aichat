@@ -6,13 +6,22 @@ import { REFERER } from "./requests";
 
 const TIMEOUT_SECONDS = 8;
 
+function fail(host: Host, reason: string): Standalone {
+  host.log(`web query rewrite failed: ${reason}`);
+  return { text: null, failed: reason };
+}
+
 type Row = { role: "user" | "assistant"; content: string };
 
 // OpenRouter's web plugin searches with the last user message alone, so a follow-up such as "What about tomorrow?"
 // finds nothing useful. One small blocking request turns it into a standalone message; any failure returns null
-// and the original message is sent as it is.
-export function standaloneMessage(host: Host, apiKey: string, modelId: string, history: Row[], text: string): string | null {
-  if (history.length === 0 || text.trim() === "" || text.length > MAX_REWRITE_INPUT || modelId === "") return null;
+// and the original message is sent as it is, with the reason in `failed` so the footer can say so.
+export type Standalone = { text: string | null; failed: string | null };
+
+const SAME: Standalone = { text: null, failed: null };
+
+export function standaloneMessage(host: Host, apiKey: string, modelId: string, history: Row[], text: string): Standalone {
+  if (history.length === 0 || text.trim() === "" || text.length > MAX_REWRITE_INPUT || modelId === "") return SAME;
   const folder = `${dataDir(host)}/web-query`;
   const bodyFile = `${folder}/${host.randomId()}.json`;
   try {
@@ -33,12 +42,13 @@ export function standaloneMessage(host: Host, apiKey: string, modelId: string, h
       ],
       { timeoutMs: (TIMEOUT_SECONDS + 2) * 1000 },
     );
-    if (run.exit !== 0) return null;
-    const parsed = JSON.parse(run.stdout) as { choices?: { message?: { content?: unknown } }[] };
+    if (run.exit !== 0) return fail(host, run.exit === 124 ? "timed out" : `curl exit ${run.exit}`);
+    const parsed = JSON.parse(run.stdout) as { choices?: { message?: { content?: unknown } }[]; error?: { message?: unknown } };
     const content = parsed.choices?.[0]?.message?.content;
-    return typeof content === "string" ? cleanRewrite(content, text) : null;
+    if (typeof content !== "string") return fail(host, typeof parsed.error?.message === "string" ? parsed.error.message : "no reply");
+    return { text: cleanRewrite(content, text), failed: null };
   } catch {
-    return null;
+    return fail(host, "unreadable reply");
   } finally {
     try {
       host.remove(bodyFile);

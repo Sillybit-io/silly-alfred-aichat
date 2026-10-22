@@ -6,6 +6,7 @@ import { mkdtempSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+const SAME = { text: null, failed: null };
 const history = [
   { role: "user" as const, content: "how is weather in New york right now?" },
   { role: "assistant" as const, content: "Sunny, 64°F." },
@@ -43,23 +44,25 @@ describe("standalone web messages", () => {
 
   test("a follow-up becomes a standalone message through one small request", () => {
     const { host: h, calls } = host(() => reply("What is the weather in New York tomorrow?"));
-    expect(standaloneMessage(h, "k", "m", history, "What about tomorrow?")).toBe("What is the weather in New York tomorrow?");
+    expect(standaloneMessage(h, "k", "m", history, "What about tomorrow?")).toEqual({ text: "What is the weather in New York tomorrow?", failed: null });
     expect(calls).toHaveLength(1);
     expect(calls[0]).toContain("http://127.0.0.1:1/v1/chat/completions");
   });
 
   test("no history, a long message, or a missing model sends nothing", () => {
     const { host: h, calls } = host(() => reply("x"));
-    expect(standaloneMessage(h, "k", "m", [], "What about tomorrow?")).toBeNull();
-    expect(standaloneMessage(h, "k", "m", history, "z".repeat(600))).toBeNull();
-    expect(standaloneMessage(h, "k", "", history, "What about tomorrow?")).toBeNull();
+    expect(standaloneMessage(h, "k", "m", [], "What about tomorrow?")).toEqual(SAME);
+    expect(standaloneMessage(h, "k", "m", history, "z".repeat(600))).toEqual(SAME);
+    expect(standaloneMessage(h, "k", "", history, "What about tomorrow?")).toEqual(SAME);
     expect(calls).toHaveLength(0);
   });
 
   test("a failed, timed-out, or garbled request returns null and leaves no body file behind", () => {
     for (const result of [{ exit: 28, stdout: "", stderr: "" }, { exit: 0, stdout: "<html>", stderr: "" }, { exit: 0, stdout: JSON.stringify({ error: { message: "no" } }), stderr: "" }]) {
       const { host: h, dir } = host(() => result);
-      expect(standaloneMessage(h, "k", "m", history, "What about tomorrow?")).toBeNull();
+      const outcome = standaloneMessage(h, "k", "m", history, "What about tomorrow?");
+      expect(outcome.text).toBeNull();
+      expect(outcome.failed).not.toBeNull();
       expect(readdirSync(join(dir, "web-query")).length).toBe(0);
     }
   });

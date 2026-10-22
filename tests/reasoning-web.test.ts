@@ -210,6 +210,23 @@ describe("live rendering and request bodies", () => {
     expect(frames.at(-1)!.response).not.toContain("What is the weather in New York tomorrow?");
   });
 
+  test("when the rewrite fails the message goes out as typed and the footer says so", async () => {
+    const ctx = fresh("anthropic/claude-sonnet-5.5");
+    command(ctx, "web", "on");
+    await loop(ctx, ["how is weather in New York right now?"]);
+    ctx.session.request_id = "";
+    const plain = ctx.host;
+    ctx.host = (more) => {
+      const host = plain(more);
+      const real = host.runSync.bind(host);
+      host.runSync = (argv, options) => (argv.some((arg) => arg.endsWith("/chat/completions")) ? { exit: 28, stdout: "", stderr: "" } : real(argv, options));
+      return host;
+    };
+    const frames = await loop(ctx, ["What about tomorrow?"]);
+    expect(bodies.at(-1).messages.at(-1).content).toBe("What about tomorrow?");
+    expect(frames[0]!.footer).toContain("search rewrite failed");
+  });
+
   test("with web off, a follow-up is sent as typed and no rewrite request is made", async () => {
     const ctx = fresh("anthropic/claude-sonnet-5.5");
     await loop(ctx, ["first"]);

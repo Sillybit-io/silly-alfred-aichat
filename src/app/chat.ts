@@ -215,9 +215,11 @@ function send(host: Host, config: Config, finalizers: Finalizers, text: string, 
   let userText = text;
   if (chat.settings.web && draft.attachments.length === 0) {
     const standalone = standaloneMessage(host, config.apiKey, config.titleModel !== "" ? config.titleModel : config.defaultModel, history, text);
-    if (standalone !== null) {
-      userText = standalone;
-      notes.push(`searched “${standalone.length > 60 ? `${standalone.slice(0, 60)}…` : standalone}”`);
+    if (standalone.text !== null) {
+      userText = standalone.text;
+      notes.push(`searched “${standalone.text.length > 60 ? `${standalone.text.slice(0, 60)}…` : standalone.text}”`);
+    } else if (standalone.failed !== null) {
+      notes.push("search rewrite failed");
     }
   }
   turns.push({ role: "user", content: userText });

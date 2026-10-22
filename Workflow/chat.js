@@ -1258,9 +1258,14 @@ ${host.nowMs()}`);
 
   // src/store/web-query.ts
   var TIMEOUT_SECONDS = 8;
+  function fail(host, reason) {
+    host.log(`web query rewrite failed: ${reason}`);
+    return { text: null, failed: reason };
+  }
+  var SAME = { text: null, failed: null };
   function standaloneMessage(host, apiKey, modelId, history, text) {
     if (history.length === 0 || text.trim() === "" || text.length > MAX_REWRITE_INPUT || modelId === "")
-      return null;
+      return SAME;
     const folder = `${dataDir(host)}/web-query`;
     const bodyFile = `${folder}/${host.randomId()}.json`;
     try {
@@ -1286,12 +1291,14 @@ ${host.nowMs()}`);
         chatUrl(host.env)
       ], { timeoutMs: (TIMEOUT_SECONDS + 2) * 1000 });
       if (run.exit !== 0)
-        return null;
+        return fail(host, run.exit === 124 ? "timed out" : `curl exit ${run.exit}`);
       const parsed = JSON.parse(run.stdout);
       const content = parsed.choices?.[0]?.message?.content;
-      return typeof content === "string" ? cleanRewrite(content, text) : null;
+      if (typeof content !== "string")
+        return fail(host, typeof parsed.error?.message === "string" ? parsed.error.message : "no reply");
+      return { text: cleanRewrite(content, text), failed: null };
     } catch {
-      return null;
+      return fail(host, "unreadable reply");
     } finally {
       try {
         host.remove(bodyFile);
@@ -3299,9 +3306,11 @@ ${body}`;
     let userText = text;
     if (chat.settings.web && draft.attachments.length === 0) {
       const standalone = standaloneMessage(host, config.apiKey, config.titleModel !== "" ? config.titleModel : config.defaultModel, history, text);
-      if (standalone !== null) {
-        userText = standalone;
-        notes.push(`searched “${standalone.length > 60 ? `${standalone.slice(0, 60)}…` : standalone}”`);
+      if (standalone.text !== null) {
+        userText = standalone.text;
+        notes.push(`searched “${standalone.text.length > 60 ? `${standalone.text.slice(0, 60)}…` : standalone.text}”`);
+      } else if (standalone.failed !== null) {
+        notes.push("search rewrite failed");
       }
     }
     turns.push({ role: "user", content: userText });
@@ -3470,7 +3479,7 @@ ${body}`;
   function fileManager() {
     return $.NSFileManager.defaultManager;
   }
-  function fail(action, path) {
+  function fail2(action, path) {
     throw new Error(`${action} failed for ${path}`);
   }
   function launch(argv, out, err) {
@@ -3491,13 +3500,13 @@ ${body}`;
     readText(path) {
       const text = $.NSString.stringWithContentsOfFileEncodingError(path, $.NSUTF8StringEncoding, $());
       if (isNil(text))
-        fail("read", path);
+        fail2("read", path);
       return ObjC.unwrap(text);
     }
     readBytesFrom(path, offset) {
       const handle = $.NSFileHandle.fileHandleForReadingAtPath(path);
       if (isNil(handle))
-        fail("open", path);
+        fail2("open", path);
       try {
         handle.seekToFileOffset(offset);
         return bytesFromData(handle.readDataToEndOfFile);
@@ -3508,22 +3517,22 @@ ${body}`;
     writeAtomic(path, data) {
       const payload = typeof data === "string" ? nsString(data).dataUsingEncoding($.NSUTF8StringEncoding) : dataFromBytes(data);
       if (!payload.writeToFileAtomically(path, true))
-        fail("write", path);
+        fail2("write", path);
     }
     mkdirp(path) {
       if (!fileManager().createDirectoryAtPathWithIntermediateDirectoriesAttributesError(path, true, $(), $()))
-        fail("mkdir", path);
+        fail2("mkdir", path);
     }
     mkdirExclusive(path) {
       if (fileManager().createDirectoryAtPathWithIntermediateDirectoriesAttributesError(path, false, $(), $()))
         return true;
       if (fileManager().fileExistsAtPath(path))
         return false;
-      return fail("mkdir", path);
+      return fail2("mkdir", path);
     }
     move(from, to) {
       if (!fileManager().moveItemAtPathToPathError(from, to, $()))
-        fail("move", `${from} to ${to}`);
+        fail2("move", `${from} to ${to}`);
     }
     remove(path) {
       if (fileManager().fileExistsAtPath(path))
@@ -3531,7 +3540,7 @@ ${body}`;
     }
     trash(path) {
       if (!fileManager().trashItemAtURLResultingItemURLError($.NSURL.fileURLWithPath(path), Ref(), $()))
-        fail("trash", path);
+        fail2("trash", path);
     }
     exists(path) {
       return fileManager().fileExistsAtPath(path);
@@ -3550,7 +3559,7 @@ ${body}`;
     listDir(path) {
       const names = fileManager().contentsOfDirectoryAtPathError(path, $());
       if (isNil(names))
-        fail("list", path);
+        fail2("list", path);
       return ObjC.deepUnwrap(names);
     }
     spawnSupervised(argv, files) {
