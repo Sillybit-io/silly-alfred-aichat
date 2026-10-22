@@ -4,6 +4,7 @@ import { BUILTIN_COMMANDS, parseCommand, renderHelp, type HelpEntry } from "../c
 import { standaloneMessage } from "../store/web-query";
 import { contextLine, composeSystemPrompt } from "../core/system-prompt";
 import { domainOf } from "../core/favicons";
+import { flattenTables } from "../core/tables";
 import { ASSISTANT_HEADING, TURN_BREAK, YOU_HEADING, formatSize, renderTranscript, sourcesOf } from "../core/transcript";
 import {
   allCommands,
@@ -50,6 +51,10 @@ function domainsOfMessage(message: Chat["messages"][number]): string[] {
 // The transcript with sources as favicons. Icons for the newest reply are fetched (and briefly waited for);
 // older ones are used only when already cached.
 function viewTranscript(host: Host, chat: Chat, waitMs: number): string {
+  return flattenTables(transcriptWithSources(host, chat, waitMs));
+}
+
+function transcriptWithSources(host: Host, chat: Chat, waitMs: number): string {
   const withSources = chat.messages.filter((message) => sourcesOf(message).length > 0);
   if (withSources.length === 0) return renderTranscript(chat);
   // Icons are an opt-in: with plain links nothing is ever downloaded.
@@ -156,7 +161,7 @@ function assistantSection(host: Host, config: Config, record: RequestRecord, cha
   if (record.kind === "image") return `${ASSISTANT_HEADING}\n\n_Generating image…_`;
   const live = renderLiveSection({ host, config, chat, record, state: record.reducer });
   const body = live ?? (record.reducer.content !== "" ? record.reducer.content : PLACEHOLDER);
-  return `${ASSISTANT_HEADING}\n\n${body}`;
+  return `${ASSISTANT_HEADING}\n\n${flattenTables(body)}`;
 }
 
 // Three frames build the view: the history and your message (replace), the assistant section

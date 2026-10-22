@@ -18,3 +18,4 @@
 - Presets set to copy or paste show their reply in a view instead (⌘↩ copies it) unless Preset Results is turned on.
 - A web follow-up such as "What about tomorrow?" is first rewritten into a standalone message by the title model, so the search has the subject and place. The chat keeps what you typed, and the footer shows what was searched. If the rewrite fails, your message is sent as typed and the footer says "search rewrite failed".
 - Image, video, and similar models with a zero token price show "priced per image" or "priced per use" instead of "free", and a model that bills only input shows only its input price.
+- Markdown tables in a reply are shown as bullet lists, because Alfred's Text View cannot draw tables; copies and exports keep the table. The default system prompt also asks the model to avoid tables.
