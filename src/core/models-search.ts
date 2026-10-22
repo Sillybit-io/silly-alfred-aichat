@@ -1,4 +1,4 @@
-import { acceptsFile, acceptsImage, isFree, perMillion, producesImage, supportsReasoning, type ModelRecord } from "./capabilities";
+import { acceptsFile, acceptsImage, isFree, perMillion, pricedPerUse, producesImage, supportsReasoning, type ModelRecord } from "./capabilities";
 
 export type ModelQuery = { words: string[]; image: boolean; imagegen: boolean; file: boolean; free: boolean; reasoning: boolean };
 
@@ -88,6 +88,8 @@ export function formatSubtitle(model: ModelRecord): string {
   const marks = badges(model);
   if (marks !== "") parts.push(marks);
   if (isFree(model)) parts.push("free");
+  else if (pricedPerUse(model)) parts.push(producesImage(model) ? "priced per image" : "priced per use");
+  else if (model.completionPrice === 0 && !model.outputModalities.includes("text")) parts.push(`${formatPrice(perMillion(model.promptPrice))} in per 1M tokens`);
   else parts.push(`${formatPrice(perMillion(model.promptPrice))} in · ${formatPrice(perMillion(model.completionPrice))} out per 1M tokens`);
   if (model.contextLength > 0) parts.push(`${formatContext(model.contextLength)} context`);
   return parts.join(" · ");

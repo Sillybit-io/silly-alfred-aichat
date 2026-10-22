@@ -49,3 +49,29 @@ describe("model search", () => {
     expect(formatSubtitle(searchModels(models, "#image gemini")[0]!)).toContain("🖼");
   });
 });
+
+describe("what counts as free", () => {
+  const raw = (id: string, pricing: Record<string, string>, output: string[]) =>
+    normalizeModel({ id, name: id, context_length: 66000, pricing: { prompt: "0", completion: "0", ...pricing }, architecture: { input_modalities: ["text"], output_modalities: output } })!;
+
+  test("an image model with a zero token price is priced per image, not free", () => {
+    const qwen = raw("qwen/qwen-image-2.1-turbo", { image_token: "0.0000044", image_output: "0.0000044" }, ["image"]);
+    expect(formatSubtitle(qwen)).toBe("🎨 · priced per image · 66k context");
+    expect(badges(qwen)).not.toContain("🆓");
+    expect(ids(searchModels([qwen], "#free"))).toEqual([]);
+    expect(formatSubtitle(raw("flux/plain", {}, ["image"]))).toContain("priced per image");
+  });
+
+  test("video and rerank models without a price say priced per use, and :free variants stay free", () => {
+    expect(formatSubtitle(raw("alibaba/wan-3.0", {}, ["video"]))).toContain("priced per use");
+    expect(formatSubtitle(raw("voyageai/rerank-3", {}, ["rerank"]))).toContain("priced per use");
+    expect(formatSubtitle(raw("nvidia/rerank:free", {}, ["rerank"]))).toContain("free");
+    expect(formatSubtitle(raw("some/text-model", {}, ["text"]))).toContain("free");
+    expect(formatSubtitle(raw("some/paid-text", { web_search: "0.01" }, ["text"]))).toContain("free");
+  });
+
+  test("a model that bills input but not output shows only the input price", () => {
+    const asr = normalizeModel({ id: "qwen/qwen3-asr-1.7b", name: "ASR", context_length: 0, pricing: { prompt: "0.0000075", completion: "0" }, architecture: { input_modalities: ["audio"], output_modalities: ["transcription"] } })!;
+    expect(formatSubtitle(asr)).toBe("$7.5 in per 1M tokens");
+  });
+});

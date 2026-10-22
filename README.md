@@ -36,6 +36,8 @@ Alternatively, select text anywhere and use the **AI Chat: Ask about this text**
 
 A reply that stalls, fails, or is cut off keeps its text, and a message that could not be sent stays in the input. Type `/retry` to send it again.
 
+In a chat with web search on, a follow-up like "What about tomorrow?" is first turned into a standalone message with the title model, so the search knows the subject. Your own wording stays in the chat, and the footer shows what was searched.
+
 Replies that used web search end with one line of short links, one per site. Type `/sources` to list every source in full. The Sources setting can add each site's icon before its link; that is experimental, because Alfred cannot make an icon itself a link.
 
 ![Sources under an answer](Workflow/images/about/sources.png)

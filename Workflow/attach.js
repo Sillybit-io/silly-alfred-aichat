@@ -554,6 +554,9 @@ ${host.nowMs()}`);
     return result;
   }
 
+  // src/core/capabilities.ts
+  var IGNORED_PRICES = new Set(["prompt", "completion", "web_search", "internal_reasoning", "input_cache_read", "input_cache_write"]);
+
   // src/store/catalog.ts
   var CATALOG_MAX_AGE_MS = 6 * 60 * 60 * 1000;
   var RETRY_AFTER_FAILURE_MS = 10 * 60 * 1000;

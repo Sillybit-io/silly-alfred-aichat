@@ -128,7 +128,7 @@ const detach: Command = {
 
 const pdf: Command = {
   usage: "/pdf [auto | free | ocr | native]",
-  help: "Choose how PDFs are read; ocr is billed per page",
+  help: "Choose how PDFs are read",
   run(ctx, args): CommandOutcome {
     const engine = args.toLowerCase();
     if (engine === "") {

@@ -183,6 +183,53 @@ describe("live rendering and request bodies", () => {
     expect(frames.at(-1)!.footer).toContain("web");
   });
 
+  test("a web follow-up is sent as a standalone message, while the chat keeps what the user typed", async () => {
+    const ctx = fresh("anthropic/claude-sonnet-5.5");
+    command(ctx, "web", "on");
+    await loop(ctx, ["how is weather in New York right now?"]);
+    expect(bodies.at(-1).messages.at(-1).content).toBe("how is weather in New York right now?");
+    ctx.session.request_id = "";
+    const plain = ctx.host;
+    const rewrites: string[][] = [];
+    ctx.host = (more) => {
+      const host = plain(more);
+      const real = host.runSync.bind(host);
+      host.runSync = (argv, options) => {
+        if (!argv.some((arg) => arg.endsWith("/chat/completions"))) return real(argv, options);
+        rewrites.push(argv);
+        return { exit: 0, stdout: JSON.stringify({ choices: [{ message: { content: "What is the weather in New York tomorrow?" } }] }), stderr: "" };
+      };
+      return host;
+    };
+    const frames = await loop(ctx, ["What about tomorrow?"]);
+    expect(rewrites).toHaveLength(1);
+    expect(bodies.at(-1).messages.at(-1)).toEqual({ role: "user", content: "What is the weather in New York tomorrow?" });
+    expect(bodies.at(-1).plugins).toEqual([{ id: "web", max_results: 5 }]);
+    expect(frames[0]!.footer).toContain("searched “What is the weather in New York tomorrow?”");
+    expect(frames.at(-1)!.response).toContain("What about tomorrow?");
+    expect(frames.at(-1)!.response).not.toContain("What is the weather in New York tomorrow?");
+  });
+
+  test("with web off, a follow-up is sent as typed and no rewrite request is made", async () => {
+    const ctx = fresh("anthropic/claude-sonnet-5.5");
+    await loop(ctx, ["first"]);
+    ctx.session.request_id = "";
+    const plain = ctx.host;
+    let rewrites = 0;
+    ctx.host = (more) => {
+      const host = plain(more);
+      const real = host.runSync.bind(host);
+      host.runSync = (argv, options) => {
+        if (argv.some((arg) => arg.endsWith("/chat/completions"))) rewrites++;
+        return real(argv, options);
+      };
+      return host;
+    };
+    await loop(ctx, ["What about tomorrow?"]);
+    expect(rewrites).toBe(0);
+    expect(bodies.at(-1).messages.at(-1).content).toBe("What about tomorrow?");
+  });
+
   test("with no setting the body carries neither a reasoning object nor a plugin", async () => {
     const ctx = fresh("anthropic/claude-sonnet-5.5");
     await loop(ctx, ["plain"]);

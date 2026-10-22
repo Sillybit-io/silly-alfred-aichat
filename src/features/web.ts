@@ -4,7 +4,7 @@ import type { Command, Feature } from "./index";
 
 const web: Command = {
   usage: "/web [on | off | status]",
-  help: "Let the model search the web in this chat (extra cost per search)",
+  help: "Let the model search the web in this chat",
   run(ctx, args) {
     const value = args.toLowerCase();
     if (value === "" || value === "status") {

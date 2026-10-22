@@ -2,6 +2,7 @@
 var __aichat_main;
 (() => {
   // src/core/capabilities.ts
+  var IGNORED_PRICES = new Set(["prompt", "completion", "web_search", "internal_reasoning", "input_cache_read", "input_cache_write"]);
   function acceptsFile(model) {
     return model !== null && model.inputModalities.includes("file");
   }

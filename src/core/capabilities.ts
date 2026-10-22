@@ -11,6 +11,8 @@ export type ModelRecord = {
   contextLength: number;
   promptPrice: number;
   completionPrice: number;
+  // True when any price besides prompt and completion is above zero, such as per-image or per-second prices.
+  otherPriced?: boolean;
   inputModalities: string[];
   outputModalities: string[];
   reasoning: ReasoningInfo | null;
@@ -31,6 +33,9 @@ function price(value: unknown): number {
   const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : 0;
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
+
+// Prices that say nothing about what the model itself costs to call.
+const IGNORED_PRICES = new Set(["prompt", "completion", "web_search", "internal_reasoning", "input_cache_read", "input_cache_write"]);
 
 // Reads one entry of the models list; entries without an id are dropped.
 export function normalizeModel(raw: unknown): ModelRecord | null {
@@ -53,6 +58,7 @@ export function normalizeModel(raw: unknown): ModelRecord | null {
     contextLength: typeof raw.context_length === "number" ? raw.context_length : 0,
     promptPrice: price(pricing.prompt),
     completionPrice: price(pricing.completion),
+    otherPriced: Object.entries(pricing).some(([key, value]) => !IGNORED_PRICES.has(key) && price(value) > 0),
     inputModalities: inputModalities.length > 0 ? inputModalities : ["text"],
     outputModalities: outputModalities.length > 0 ? outputModalities : ["text"],
     reasoning,
@@ -88,6 +94,14 @@ export function perMillion(perToken: number): number {
   return Math.round(perToken * 1_000_000 * 1e6) / 1e6;
 }
 
+// Only text models and ":free" variants can be called free: image, video, and similar models report a zero
+// token price because they are billed per image or per second.
 export function isFree(model: ModelRecord): boolean {
-  return model.promptPrice === 0 && model.completionPrice === 0;
+  if (model.promptPrice !== 0 || model.completionPrice !== 0 || model.otherPriced === true) return false;
+  return model.id.endsWith(":free") || model.outputModalities.every((modality) => modality === "text");
+}
+
+// Zero token prices on a model that is not free: the real price is per image, per second, or per use.
+export function pricedPerUse(model: ModelRecord): boolean {
+  return model.promptPrice === 0 && model.completionPrice === 0 && !isFree(model);
 }

@@ -12,6 +12,7 @@ var __aichat_main;
     const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : 0;
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
   }
+  var IGNORED_PRICES = new Set(["prompt", "completion", "web_search", "internal_reasoning", "input_cache_read", "input_cache_write"]);
   function normalizeModel(raw) {
     if (!isObject(raw) || typeof raw.id !== "string" || raw.id === "")
       return null;
@@ -31,6 +32,7 @@ var __aichat_main;
       contextLength: typeof raw.context_length === "number" ? raw.context_length : 0,
       promptPrice: price(pricing.prompt),
       completionPrice: price(pricing.completion),
+      otherPriced: Object.entries(pricing).some(([key, value]) => !IGNORED_PRICES.has(key) && price(value) > 0),
       inputModalities: inputModalities.length > 0 ? inputModalities : ["text"],
       outputModalities: outputModalities.length > 0 ? outputModalities : ["text"],
       reasoning,
@@ -61,7 +63,12 @@ var __aichat_main;
     return Math.round(perToken * 1e6 * 1e6) / 1e6;
   }
   function isFree(model) {
-    return model.promptPrice === 0 && model.completionPrice === 0;
+    if (model.promptPrice !== 0 || model.completionPrice !== 0 || model.otherPriced === true)
+      return false;
+    return model.id.endsWith(":free") || model.outputModalities.every((modality) => modality === "text");
+  }
+  function pricedPerUse(model) {
+    return model.promptPrice === 0 && model.completionPrice === 0 && !isFree(model);
   }
 
   // src/core/payload.ts
@@ -180,429 +187,31 @@ var __aichat_main;
 `);
   }
 
-  // src/core/system-prompt.ts
-  var WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-  var MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-  var two = (value) => String(value).padStart(2, "0");
-  function formatNow(info) {
-    const local = new Date(info.nowMs - info.offsetMinutes * 60000);
-    const offset = -info.offsetMinutes;
-    const sign = offset < 0 ? "-" : "+";
-    const zone = `UTC${sign}${two(Math.floor(Math.abs(offset) / 60))}:${two(Math.abs(offset) % 60)}${info.timezone ? `, ${info.timezone}` : ""}`;
-    return `${WEEKDAYS[local.getUTCDay()]}, ${local.getUTCDate()} ${MONTHS[local.getUTCMonth()]} ${local.getUTCFullYear()}, ${two(local.getUTCHours())}:${two(local.getUTCMinutes())} (${zone})`;
+  // src/core/web-query.ts
+  var MAX_ROWS = 6;
+  var MAX_ROW_CHARS = 400;
+  var MAX_REWRITE_INPUT = 500;
+  var REWRITE_PROMPT = "Rewrite the user's last message so it can be understood without the conversation, because it will be used for a web search. Fill in only what it leaves out, such as the place, subject, date, or names, taken from the conversation. Keep the user's wording and language, and do not answer it. If it already stands on its own, repeat it unchanged. Reply with only the rewritten message.";
+  function clip(text, length) {
+    return text.length > length ? `${text.slice(0, length)}…` : text;
   }
-  function contextLine(info) {
-    const facts = [`Current date and time: ${formatNow(info)}.`];
-    if (info.locale)
-      facts.push(`The user's locale is ${info.locale}.`);
-    if (info.os)
-      facts.push(`The user is on macOS ${info.os}.`);
-    return facts.join(" ");
-  }
-  var WEB_LINE = "Web search is on. Cite sources inline as Markdown links on the claim they support, and do not add a separate list of sources at the end.";
-  function composeSystemPrompt(parts) {
-    return [parts.base.trim(), parts.context ?? "", parts.web ? WEB_LINE : ""].filter((part) => part !== "").join(`
+  function rewriteTurns(history, text) {
+    const rows = history.slice(-MAX_ROWS).map((row) => `${row.role === "user" ? "User" : "Assistant"}: ${clip(row.content.replace(/\s+/g, " ").trim(), MAX_ROW_CHARS)}`);
+    return [
+      { role: "system", content: REWRITE_PROMPT },
+      { role: "user", content: `Conversation:
+${rows.join(`
+`)}
 
-`);
+Last message:
+${text}` }
+    ];
   }
-
-  // src/core/favicons.ts
-  function domainOf(url) {
-    const match = /^https?:\/\/([^/:?#\s]+)/i.exec(url.trim());
-    if (!match)
+  function cleanRewrite(reply, original) {
+    const stripped = reply.trim().replace(/^(last message|rewritten message|rewrite)\s*:\s*/i, "").replace(/^["'“”‘’`]+|["'“”‘’`]+$/g, "").trim();
+    if (stripped === "" || stripped.length > original.length * 3 + 200)
       return null;
-    const host = match[1].toLowerCase().replace(/^www\./, "").replace(/\.$/, "");
-    return isSafeDomain(host) ? host : null;
-  }
-  function isSafeDomain(host) {
-    if (host.length < 4 || host.length > 253)
-      return false;
-    if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(host))
-      return false;
-    if (/^\d+(\.\d+)*$/.test(host) || /^[0-9]+$/.test(host.slice(host.lastIndexOf(".") + 1)))
-      return false;
-    const last = host.slice(host.lastIndexOf(".") + 1);
-    if (["local", "localhost", "internal", "lan", "home", "corp", "intranet", "test", "invalid", "example"].indexOf(last) >= 0)
-      return false;
-    return true;
-  }
-  var MAX_ICON_BYTES = 64 * 1024;
-  function startsWith(bytes, signature) {
-    return bytes.length >= signature.length && signature.every((value, i) => bytes[i] === value);
-  }
-  function isRasterIcon(bytes) {
-    if (bytes.length === 0 || bytes.length > MAX_ICON_BYTES)
-      return false;
-    return startsWith(bytes, [137, 80, 78, 71, 13, 10, 26, 10]) || startsWith(bytes, [0, 0, 1, 0]) || startsWith(bytes, [71, 73, 70, 56]) || startsWith(bytes, [255, 216, 255]);
-  }
-  function labelOf(url) {
-    const domain = domainOf(url);
-    const host = domain ?? (/^https?:\/\/([^/?#]+)/i.exec(url)?.[1] ?? "link");
-    return host.replace(/([\\_*`\[\]])/g, "\\$1");
-  }
-  function sourcesRow(sources, style) {
-    const seen = new Set;
-    const unique = sources.filter((source) => {
-      const key = labelOf(source.url);
-      if (seen.has(key))
-        return false;
-      seen.add(key);
-      return true;
-    });
-    const shown = unique.slice(0, style.cap);
-    const links = shown.map((source) => {
-      const domain = domainOf(source.url);
-      const icon = style.icons && domain !== null ? style.icon(domain) : null;
-      const link = `[${labelOf(source.url)}](${source.url.replace(/\s/g, "%20").replace(/\(/g, "%28").replace(/\)/g, "%29")})`;
-      return icon === null ? link : `![](${icon}) ${link}`;
-    });
-    const more = unique.length > shown.length ? `  ·  +${unique.length - shown.length} more with \`/sources\`` : "";
-    return `**Sources**  ${links.join("  ·  ")}${more}`;
-  }
-
-  // src/core/transcript.ts
-  var YOU_HEADING = "# \uD83E\uDDD1 You";
-  var ASSISTANT_HEADING = "# \uD83E\uDD16 Assistant";
-  var TURN_BREAK = "---";
-  function formatSize(bytes) {
-    if (bytes < 1024)
-      return `${bytes} B`;
-    if (bytes < 1024 * 1024)
-      return `${Math.round(bytes / 1024)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  }
-  function sourcesOf(message) {
-    const seen = new Set;
-    const sources = [];
-    for (const annotation of message.annotations ?? []) {
-      if (annotation.type !== "url_citation")
-        continue;
-      const inner = typeof annotation.url_citation === "object" && annotation.url_citation !== null ? annotation.url_citation : annotation;
-      const url = typeof inner.url === "string" ? inner.url : "";
-      if (url === "" || seen.has(url))
-        continue;
-      seen.add(url);
-      sources.push({ url, title: typeof inner.title === "string" && inner.title !== "" ? inner.title : url });
-    }
-    return sources;
-  }
-  function quote(text) {
-    return text.split(`
-`).map((line) => line === "" ? ">" : `> ${line}`).join(`
-`);
-  }
-  function renderMessage(message, style) {
-    const parts = [message.role === "user" ? YOU_HEADING : ASSISTANT_HEADING];
-    if (message.reasoning)
-      parts.push(quote(message.reasoning.trim()));
-    if (message.content !== "")
-      parts.push(message.content);
-    for (const attachment of message.attachments)
-      parts.push(`\uD83D\uDCCE ${attachment.name} (${formatSize(attachment.size)})`);
-    const sources = sourcesOf(message);
-    if (sources.length > 0) {
-      parts.push(style ? sourcesRow(sources, style) : ["**Sources**", ...sources.map((source) => `- [${source.title}](${source.url})`)].join(`
-`));
-    }
-    if (message.status === "interrupted")
-      parts.push(`_⚠ Interrupted${message.error ? `: ${message.error}` : ""}. Send "continue" to get the rest._`);
-    if (message.status === "stopped")
-      parts.push('_■ Stopped. Send "continue" to get the rest._');
-    return parts.join(`
-
-`);
-  }
-  function renderTranscript(chat, style) {
-    return chat.messages.map((message, i) => `${message.role === "user" && i > 0 ? `${TURN_BREAK}
-
-` : ""}${renderMessage(message, style)}`).join(`
-
-`);
-  }
-  function lastReply(chat) {
-    for (let i = chat.messages.length - 1;i >= 0; i--)
-      if (chat.messages[i].role === "assistant")
-        return chat.messages[i];
-    return null;
-  }
-
-  // src/core/attachments.ts
-  var MAX_FILE_BYTES = 20 * 1024 * 1024;
-  var MAX_PENDING = 8;
-  var MAX_BODY_BYTES = 32 * 1024 * 1024;
-  var IMAGE_MIME = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif" };
-  function extensionOf(name) {
-    const dot = name.lastIndexOf(".");
-    return dot > 0 && dot < name.length - 1 ? name.slice(dot + 1).toLowerCase().replace(/[^a-z0-9]/g, "") : "";
-  }
-  function baseName(path) {
-    const slash = path.lastIndexOf("/");
-    return slash >= 0 ? path.slice(slash + 1) : path;
-  }
-  function classifyName(name) {
-    const ext = extensionOf(name);
-    const image = IMAGE_MIME[ext];
-    if (image)
-      return { kind: "image", ext: ext === "jpeg" ? "jpg" : ext, mime: image };
-    if (ext === "pdf")
-      return { kind: "file", ext, mime: "application/pdf" };
-    return { kind: "unknown", ext: ext === "" ? "txt" : ext, mime: "text/plain" };
-  }
-  function looksLikeText(bytes) {
-    const sample = Math.min(bytes.length, 8192);
-    for (let i = 0;i < sample; i++)
-      if (bytes[i] === 0)
-        return false;
-    return true;
-  }
-  function megabytes(bytes) {
-    return `${Number((bytes / (1024 * 1024)).toFixed(1))} MB`;
-  }
-
-  // src/core/base64.ts
-  var ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  var LOOKUP = (() => {
-    const table = new Array(128).fill(-1);
-    for (let i = 0;i < ALPHABET.length; i++)
-      table[ALPHABET.charCodeAt(i)] = i;
-    return table;
-  })();
-  function encodeBase64(bytes) {
-    const parts = [];
-    for (let i = 0;i < bytes.length; i += 3) {
-      const a = bytes[i];
-      const b = i + 1 < bytes.length ? bytes[i + 1] : 0;
-      const c = i + 2 < bytes.length ? bytes[i + 2] : 0;
-      const chunk = a << 16 | b << 8 | c;
-      parts.push(ALPHABET[chunk >> 18 & 63] + ALPHABET[chunk >> 12 & 63] + (i + 1 < bytes.length ? ALPHABET[chunk >> 6 & 63] : "=") + (i + 2 < bytes.length ? ALPHABET[chunk & 63] : "="));
-    }
-    return parts.join("");
-  }
-  function decodeBase64(text) {
-    const symbols = [];
-    for (let i = 0;i < text.length; i++) {
-      const code = text.charCodeAt(i);
-      if (code === 61)
-        break;
-      if (code === 10 || code === 13 || code === 32 || code === 9)
-        continue;
-      const value = code < 128 ? LOOKUP[code] : -1;
-      if (value < 0)
-        throw new Error(`invalid base64 character at ${i}`);
-      symbols.push(value);
-    }
-    if (symbols.length % 4 === 1)
-      throw new Error("invalid base64 length");
-    const out = new Uint8Array(Math.floor(symbols.length * 3 / 4));
-    let o = 0;
-    for (let i = 0;i < symbols.length; i += 4) {
-      const s0 = symbols[i];
-      const s1 = symbols[i + 1];
-      const s2 = i + 2 < symbols.length ? symbols[i + 2] : 0;
-      const s3 = i + 3 < symbols.length ? symbols[i + 3] : 0;
-      const chunk = s0 << 18 | s1 << 12 | s2 << 6 | s3;
-      if (o < out.length)
-        out[o++] = chunk >> 16 & 255;
-      if (o < out.length)
-        out[o++] = chunk >> 8 & 255;
-      if (o < out.length)
-        out[o++] = chunk & 255;
-    }
-    return out;
-  }
-
-  // src/core/utf8.ts
-  function continuation(bytes, index, low = 128, high = 191) {
-    return index < bytes.length && bytes[index] >= low && bytes[index] <= high;
-  }
-  function decodeUtf8(bytes) {
-    const parts = [];
-    let run = [];
-    const flush = () => {
-      if (run.length > 0) {
-        parts.push(String.fromCharCode(...run));
-        run = [];
-      }
-    };
-    const push = (codePoint) => {
-      if (codePoint > 65535) {
-        const offset = codePoint - 65536;
-        run.push(55296 + (offset >> 10), 56320 + (offset & 1023));
-      } else {
-        run.push(codePoint);
-      }
-      if (run.length >= 4096)
-        flush();
-    };
-    let i = 0;
-    while (i < bytes.length) {
-      const lead = bytes[i];
-      if (lead < 128) {
-        push(lead);
-        i += 1;
-      } else if (lead >= 194 && lead <= 223) {
-        if (continuation(bytes, i + 1)) {
-          push((lead & 31) << 6 | bytes[i + 1] & 63);
-          i += 2;
-        } else {
-          push(65533);
-          i += 1;
-        }
-      } else if (lead >= 224 && lead <= 239) {
-        const low = lead === 224 ? 160 : 128;
-        const high = lead === 237 ? 159 : 191;
-        if (!continuation(bytes, i + 1, low, high)) {
-          push(65533);
-          i += 1;
-        } else if (!continuation(bytes, i + 2)) {
-          push(65533);
-          i += 2;
-        } else {
-          push((lead & 15) << 12 | (bytes[i + 1] & 63) << 6 | bytes[i + 2] & 63);
-          i += 3;
-        }
-      } else if (lead >= 240 && lead <= 244) {
-        const low = lead === 240 ? 144 : 128;
-        const high = lead === 244 ? 143 : 191;
-        if (!continuation(bytes, i + 1, low, high)) {
-          push(65533);
-          i += 1;
-        } else if (!continuation(bytes, i + 2)) {
-          push(65533);
-          i += 2;
-        } else if (!continuation(bytes, i + 3)) {
-          push(65533);
-          i += 3;
-        } else {
-          push((lead & 7) << 18 | (bytes[i + 1] & 63) << 12 | (bytes[i + 2] & 63) << 6 | bytes[i + 3] & 63);
-          i += 4;
-        }
-      } else {
-        push(65533);
-        i += 1;
-      }
-    }
-    flush();
-    return parts.join("");
-  }
-
-  // src/core/sha256.ts
-  var K = [
-    1116352408,
-    1899447441,
-    3049323471,
-    3921009573,
-    961987163,
-    1508970993,
-    2453635748,
-    2870763221,
-    3624381080,
-    310598401,
-    607225278,
-    1426881987,
-    1925078388,
-    2162078206,
-    2614888103,
-    3248222580,
-    3835390401,
-    4022224774,
-    264347078,
-    604807628,
-    770255983,
-    1249150122,
-    1555081692,
-    1996064986,
-    2554220882,
-    2821834349,
-    2952996808,
-    3210313671,
-    3336571891,
-    3584528711,
-    113926993,
-    338241895,
-    666307205,
-    773529912,
-    1294757372,
-    1396182291,
-    1695183700,
-    1986661051,
-    2177026350,
-    2456956037,
-    2730485921,
-    2820302411,
-    3259730800,
-    3345764771,
-    3516065817,
-    3600352804,
-    4094571909,
-    275423344,
-    430227734,
-    506948616,
-    659060556,
-    883997877,
-    958139571,
-    1322822218,
-    1537002063,
-    1747873779,
-    1955562222,
-    2024104815,
-    2227730452,
-    2361852424,
-    2428436474,
-    2756734187,
-    3204031479,
-    3329325298
-  ];
-  function rotr(x, n) {
-    return x >>> n | x << 32 - n;
-  }
-  function sha256Hex(bytes) {
-    const length = bytes.length;
-    const padded = new Uint8Array(length + 9 + 63 >> 6 << 6);
-    padded.set(bytes);
-    padded[length] = 128;
-    const bitsHigh = Math.floor(length / 536870912);
-    const bitsLow = length << 3 >>> 0;
-    const view = new DataView(padded.buffer);
-    view.setUint32(padded.length - 8, bitsHigh);
-    view.setUint32(padded.length - 4, bitsLow);
-    const h = [1779033703, 3144134277, 1013904242, 2773480762, 1359893119, 2600822924, 528734635, 1541459225];
-    const w = new Array(64);
-    for (let offset = 0;offset < padded.length; offset += 64) {
-      for (let i = 0;i < 16; i++)
-        w[i] = view.getUint32(offset + i * 4);
-      for (let i = 16;i < 64; i++) {
-        const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ w[i - 15] >>> 3;
-        const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ w[i - 2] >>> 10;
-        w[i] = w[i - 16] + s0 + w[i - 7] + s1 | 0;
-      }
-      let [a, b, c, d, e, f, g, hh] = h;
-      for (let i = 0;i < 64; i++) {
-        const s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
-        const ch = e & f ^ ~e & g;
-        const t1 = hh + s1 + ch + K[i] + w[i] | 0;
-        const s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
-        const maj = a & b ^ a & c ^ b & c;
-        const t2 = s0 + maj | 0;
-        hh = g;
-        g = f;
-        f = e;
-        e = d + t1 | 0;
-        d = c;
-        c = b;
-        b = a;
-        a = t1 + t2 | 0;
-      }
-      h[0] = h[0] + a | 0;
-      h[1] = h[1] + b | 0;
-      h[2] = h[2] + c | 0;
-      h[3] = h[3] + d | 0;
-      h[4] = h[4] + e | 0;
-      h[5] = h[5] + f | 0;
-      h[6] = h[6] + g | 0;
-      h[7] = h[7] + hh | 0;
-    }
-    return h.map((word) => (word >>> 0).toString(16).padStart(8, "0")).join("");
+    return stripped === original.trim() ? null : stripped;
   }
 
   // src/core/ids.ts
@@ -788,123 +397,6 @@ ${host.nowMs()}`);
     return null;
   }
 
-  // src/store/attach.ts
-  function downscaled(host, config, path, classified) {
-    if (classified.kind !== "image" || classified.ext !== "png" && classified.ext !== "jpg")
-      return null;
-    let probe;
-    try {
-      probe = host.runSync(["/usr/bin/sips", "-g", "pixelWidth", "-g", "pixelHeight", path], { timeoutMs: 15000 });
-    } catch {
-      return null;
-    }
-    if (probe.exit !== 0)
-      return null;
-    const width = Number(/pixelWidth:\s*(\d+)/.exec(probe.stdout)?.[1] ?? 0);
-    const height = Number(/pixelHeight:\s*(\d+)/.exec(probe.stdout)?.[1] ?? 0);
-    if (Math.max(width, height) <= config.imageMaxEdge)
-      return null;
-    host.mkdirp(cacheDir(host));
-    const temp = `${cacheDir(host)}/resize-${host.randomId()}.${classified.ext}`;
-    try {
-      const result = host.runSync(["/usr/bin/sips", "-Z", String(config.imageMaxEdge), path, "--out", temp], { timeoutMs: 30000 });
-      return result.exit === 0 && host.exists(temp) ? host.readBytesFrom(temp, 0) : null;
-    } catch {
-      return null;
-    } finally {
-      host.remove(temp);
-    }
-  }
-  function snapshot(host, chatId, source) {
-    const sha = sha256Hex(source.bytes);
-    const file = `attachments/${sha}.${source.classified.ext}`;
-    const dir = attachmentsDir(host, chatId);
-    host.mkdirExclusive(dir);
-    const target = `${dir}/${sha}.${source.classified.ext}`;
-    if (!host.exists(target))
-      host.writeAtomic(target, source.bytes);
-    return {
-      name: source.name,
-      kind: source.classified.kind === "unknown" ? "text" : source.classified.kind,
-      mime: source.classified.mime,
-      size: source.bytes.length,
-      sha,
-      file
-    };
-  }
-  function prepareOne(host, config, path) {
-    const name = baseName(path);
-    const info = host.stat(path);
-    if (!info)
-      return `${name}: the file does not exist`;
-    if (info.isDirectory)
-      return `${name}: folders cannot be attached`;
-    if (info.size > MAX_FILE_BYTES)
-      return `${name}: ${megabytes(info.size)} is over the 20 MB per-file cap`;
-    const classified = classifyName(name);
-    let bytes = host.readBytesFrom(path, 0);
-    if (classified.kind === "unknown") {
-      if (bytes.length > config.textAttachmentMaxKb * 1024)
-        return `${name}: text files are limited to ${config.textAttachmentMaxKb} KB`;
-      if (!looksLikeText(bytes))
-        return `${name}: this file type cannot be read; attach images, PDFs, or text files`;
-      decodeUtf8(bytes);
-      return { name, bytes, classified: { kind: "unknown", ext: classified.ext, mime: "text/plain" } };
-    }
-    const smaller = downscaled(host, config, path, classified);
-    if (smaller)
-      bytes = smaller;
-    return { name, bytes, classified };
-  }
-  function attachPaths(host, config, chatId, paths) {
-    const result = { added: [], errors: [] };
-    const chatPending = () => {
-      let count = 0;
-      mutateChat(host, chatId, (chat) => {
-        count = chat.pending.length;
-        return false;
-      });
-      return count;
-    };
-    let pending = chatPending();
-    for (const path of paths) {
-      if (pending + result.added.length >= MAX_PENDING) {
-        result.errors.push(`${baseName(path)}: a message can carry ${MAX_PENDING} files; send it first or use /detach`);
-        continue;
-      }
-      const prepared = prepareOne(host, config, path);
-      if (typeof prepared === "string") {
-        result.errors.push(prepared);
-        continue;
-      }
-      result.added.push(snapshot(host, chatId, prepared));
-    }
-    if (result.added.length > 0) {
-      mutateChat(host, chatId, (chat) => {
-        for (const ref of result.added)
-          if (!chat.pending.some((p) => p.sha === ref.sha && p.name === ref.name))
-            chat.pending.push(ref);
-      });
-    }
-    return result;
-  }
-  function attachBytes(host, config, chatId, name, bytes) {
-    const classified = classifyName(name);
-    if (classified.kind !== "image")
-      return { added: [], errors: [`${name}: only images can be pasted`] };
-    if (bytes.length > MAX_FILE_BYTES)
-      return { added: [], errors: [`${name}: ${megabytes(bytes.length)} is over the 20 MB per-file cap`] };
-    const ref = snapshot(host, chatId, { name, bytes, classified });
-    let pending = 0;
-    mutateChat(host, chatId, (chat) => {
-      pending = chat.pending.length;
-      if (pending >= MAX_PENDING)
-        return false;
-      chat.pending.push(ref);
-    });
-    return pending >= MAX_PENDING ? { added: [], errors: [`${name}: a message can carry ${MAX_PENDING} files`] } : { added: [ref], errors: [] };
-  }
-
   // src/core/errors.ts
   function lastStatus(headers) {
     const lines = headers.split(/\r\n|\r|\n/);
@@ -929,17 +421,17 @@ ${host.nowMs()}`);
       if (typeof parsed === "object" && parsed !== null) {
         const error = parsed.error;
         if (typeof error === "string" && error !== "")
-          return clip(error);
+          return clip2(error);
         if (typeof error === "object" && error !== null) {
           const message = error.message;
           if (typeof message === "string" && message !== "")
-            return clip(message);
+            return clip2(message);
         }
       }
     } catch {}
     return null;
   }
-  function clip(text) {
+  function clip2(text) {
     const flat = text.replace(/\s+/g, " ").trim();
     return flat.length > 300 ? `${flat.slice(0, 297)}...` : flat;
   }
@@ -1069,7 +561,7 @@ ${host.nowMs()}`);
     }
     return {
       title: "The model stopped with an error",
-      detail: clip(error.message),
+      detail: clip2(error.message),
       next: "Use /retry, or pick another model with /model."
     };
   }
@@ -1110,533 +602,79 @@ ${host.nowMs()}`);
     };
   }
 
-  // src/store/catalog.ts
-  var CATALOG_MAX_AGE_MS = 6 * 60 * 60 * 1000;
-  var RETRY_AFTER_FAILURE_MS = 10 * 60 * 1000;
-  var STUCK_REFRESH_MS = 2 * 60 * 1000;
-  var cacheFile = (host) => `${cacheDir(host)}/models.json`;
-  var transportDir = (host) => `${cacheDir(host)}/catalog`;
-  var part = (host) => `${transportDir(host)}/models.part`;
-  var files = (host) => ({
-    pid: `${transportDir(host)}/models.pid`,
-    exit: `${transportDir(host)}/models.exit`,
-    stderr: `${transportDir(host)}/models.stderr`,
-    headers: `${transportDir(host)}/models.headers`
-  });
-  var failedAt = (host) => `${transportDir(host)}/failed-at`;
-  var startedAt = (host) => `${transportDir(host)}/started-at`;
-  function curl(host) {
-    return host.env.aichat_curl ?? "/usr/bin/curl";
+  // src/core/utf8.ts
+  function continuation(bytes, index, low = 128, high = 191) {
+    return index < bytes.length && bytes[index] >= low && bytes[index] <= high;
   }
-  function curlArgs(host, extra) {
-    return [
-      curl(host),
-      "-o",
-      part(host),
-      "-D",
-      files(host).headers,
-      "--silent",
-      "--show-error",
-      "--connect-timeout",
-      "10",
-      ...extra,
-      `${apiBase(host.env)}/models?output_modalities=all`
-    ];
-  }
-  function loadCatalog(host) {
-    try {
-      const parsed = JSON.parse(host.readText(cacheFile(host)));
-      if (typeof parsed.fetchedAt !== "number" || !Array.isArray(parsed.models))
-        return null;
-      return { fetchedAt: parsed.fetchedAt, models: parsed.models };
-    } catch {
-      return null;
-    }
-  }
-  function readTrimmed(host, path) {
-    try {
-      return host.readText(path).trim();
-    } catch {
-      return null;
-    }
-  }
-  function clearTransport(host) {
-    const f = files(host);
-    for (const path of [part(host), f.pid, f.exit, f.stderr, f.headers, startedAt(host)])
-      host.remove(path);
-  }
-  function installDownload(host, curlExit) {
-    if (curlExit !== 0)
-      return { ok: false, reason: mapCurlExit(curlExit).title };
-    const status = lastStatus(readTrimmed(host, files(host).headers) ?? "");
-    if (!status || status.status !== 200)
-      return { ok: false, reason: `HTTP ${status ? status.status : "?"}` };
-    let body;
-    try {
-      body = JSON.parse(host.readText(part(host)));
-    } catch {
-      return { ok: false, reason: "unreadable list" };
-    }
-    const data = typeof body === "object" && body !== null ? body.data : undefined;
-    if (!Array.isArray(data))
-      return { ok: false, reason: "unexpected list" };
-    const models = data.map(normalizeModel).filter((model) => model !== null);
-    host.writeAtomic(cacheFile(host), JSON.stringify({ fetchedAt: host.nowMs(), models }));
-    return { ok: true };
-  }
-  function refreshInFlight(host) {
-    if (host.exists(files(host).exit))
-      return false;
-    const started = Number(readTrimmed(host, startedAt(host)));
-    if (!Number.isFinite(started) || started <= 0)
-      return false;
-    if (host.nowMs() - started > STUCK_REFRESH_MS) {
-      clearTransport(host);
-      return false;
-    }
-    return true;
-  }
-  function ensureCatalog(host) {
-    host.mkdirp(transportDir(host));
-    const f = files(host);
-    let note = null;
-    const finished = readTrimmed(host, f.exit);
-    if (finished !== null) {
-      const result = installDownload(host, Number(finished));
-      clearTransport(host);
-      if (!result.ok) {
-        note = `Model list refresh failed (${result.reason}); showing the saved list`;
-        host.writeAtomic(failedAt(host), String(host.nowMs()));
-      } else {
-        host.remove(failedAt(host));
-      }
-    }
-    let cache = loadCatalog(host);
-    if (!cache) {
-      clearTransport(host);
-      const run = host.runSync(curlArgs(host, ["--max-time", "10"]), { timeoutMs: 15000 });
-      const result = installDownload(host, run.exit);
-      clearTransport(host);
-      if (!result.ok)
-        return { models: [], note: `Could not load the model list (${result.reason})`, refreshing: false };
-      cache = loadCatalog(host);
-      return { models: cache ? cache.models : [], note: null, refreshing: false };
-    }
-    let refreshing = refreshInFlight(host);
-    if (!refreshing && host.nowMs() - cache.fetchedAt > CATALOG_MAX_AGE_MS) {
-      const failed = Number(readTrimmed(host, failedAt(host)) ?? 0);
-      if (host.nowMs() - failed > RETRY_AFTER_FAILURE_MS) {
-        clearTransport(host);
-        host.writeAtomic(startedAt(host), String(host.nowMs()));
-        host.spawnSupervised(curlArgs(host, ["--max-time", "60"]), { pid: f.pid, exit: f.exit, stderr: f.stderr });
-        refreshing = true;
-      }
-    }
-    return { models: cache.models, note, refreshing };
-  }
-  function getModel(host, id) {
-    const cache = loadCatalog(host);
-    return cache ? cache.models.find((model) => model.id === id) ?? null : null;
-  }
-
-  // src/core/models-search.ts
-  function parseQuery(query) {
-    const parsed = { words: [], image: false, imagegen: false, file: false, free: false, reasoning: false };
-    for (const token of query.toLowerCase().split(/\s+/)) {
-      if (token === "")
-        continue;
-      if (token === "#image")
-        parsed.image = true;
-      else if (token === "#imagegen")
-        parsed.imagegen = true;
-      else if (token === "#file")
-        parsed.file = true;
-      else if (token === "#free")
-        parsed.free = true;
-      else if (token === "#reasoning")
-        parsed.reasoning = true;
-      else
-        parsed.words.push(token);
-    }
-    return parsed;
-  }
-  function wordScore(model, word) {
-    const id = model.id.toLowerCase();
-    const name = model.name.toLowerCase();
-    const slug = id.slice(id.indexOf("/") + 1);
-    if (id === word || slug === word)
-      return 100;
-    if (id.startsWith(word))
-      return 60;
-    if (slug.startsWith(word) || name.startsWith(word))
-      return 50;
-    if (name.split(/[\s:/()-]+/).some((part) => part.startsWith(word)) || slug.split(/[-_.:/]/).some((part) => part.startsWith(word)))
-      return 30;
-    if (id.includes(word) || name.includes(word))
-      return 10;
-    return 0;
-  }
-  function searchModels(models, query, options = {}) {
-    const parsed = parseQuery(query);
-    const favorites = options.favorites ?? [];
-    const ranked = [];
-    models.forEach((model, order) => {
-      if (parsed.image && !acceptsImage(model))
-        return;
-      if (parsed.imagegen && !producesImage(model))
-        return;
-      if (parsed.file && !acceptsFile(model))
-        return;
-      if (parsed.free && !isFree(model))
-        return;
-      if (parsed.reasoning && !supportsReasoning(model))
-        return;
-      let score = 0;
-      for (const word of parsed.words) {
-        const wordRank = wordScore(model, word);
-        if (wordRank === 0)
-          return;
-        score += wordRank;
-      }
-      ranked.push({ model, score, order });
-    });
-    ranked.sort((a, b) => {
-      const fa = favorites.indexOf(a.model.id);
-      const fb = favorites.indexOf(b.model.id);
-      if (fa >= 0 !== fb >= 0)
-        return fa >= 0 ? -1 : 1;
-      if (fa >= 0 && fb >= 0 && fa !== fb)
-        return fa - fb;
-      return b.score - a.score || a.order - b.order;
-    });
-    const found = ranked.map((entry) => entry.model);
-    return options.limit === undefined ? found : found.slice(0, options.limit);
-  }
-  function formatPrice(perMillionTokens) {
-    if (perMillionTokens === 0)
-      return "$0";
-    if (perMillionTokens >= 1)
-      return `$${Number(perMillionTokens.toFixed(2))}`;
-    return `$${Number(perMillionTokens.toPrecision(2))}`;
-  }
-  function formatContext(tokens) {
-    if (tokens >= 1e6)
-      return `${Number((tokens / 1e6).toFixed(1))}M`;
-    if (tokens >= 1000)
-      return `${Math.round(tokens / 1000)}k`;
-    return String(tokens);
-  }
-  function badges(model) {
-    const list = [];
-    if (acceptsImage(model))
-      list.push("\uD83D\uDDBC");
-    if (producesImage(model))
-      list.push("\uD83C\uDFA8");
-    if (acceptsFile(model))
-      list.push("\uD83D\uDCC4");
-    if (supportsReasoning(model))
-      list.push("\uD83E\uDDE0");
-    if (isFree(model))
-      list.push("\uD83C\uDD93");
-    return list.join(" ");
-  }
-  function formatSubtitle(model) {
+  function decodeUtf8(bytes) {
     const parts = [];
-    const marks = badges(model);
-    if (marks !== "")
-      parts.push(marks);
-    if (isFree(model))
-      parts.push("free");
-    else
-      parts.push(`${formatPrice(perMillion(model.promptPrice))} in · ${formatPrice(perMillion(model.completionPrice))} out per 1M tokens`);
-    if (model.contextLength > 0)
-      parts.push(`${formatContext(model.contextLength)} context`);
-    return parts.join(" · ");
-  }
-
-  // src/store/settings.ts
-  function emptySettings() {
-    return { schema: 1, defaultModel: null, lastModel: null, favorites: [] };
-  }
-  function path(host) {
-    return `${dataDir(host)}/settings.json`;
-  }
-  function getSettings(host) {
-    try {
-      const parsed = JSON.parse(host.readText(path(host)));
-      return {
-        schema: 1,
-        defaultModel: typeof parsed.defaultModel === "string" ? parsed.defaultModel : null,
-        lastModel: typeof parsed.lastModel === "string" ? parsed.lastModel : null,
-        favorites: Array.isArray(parsed.favorites) ? parsed.favorites.filter((id) => typeof id === "string") : []
-      };
-    } catch {
-      return emptySettings();
-    }
-  }
-  function mutateSettings(host, fn) {
-    host.mkdirp(dataDir(host));
-    return withLock(host, `${dataDir(host)}/settings.lock`, () => {
-      const settings = getSettings(host);
-      fn(settings);
-      host.writeAtomic(path(host), JSON.stringify(settings, null, 2));
-      return settings;
-    });
-  }
-  function setLastModel(host, id) {
-    return mutateSettings(host, (settings) => {
-      settings.lastModel = id;
-    });
-  }
-
-  // src/features/model.ts
-  function chatNeeds(chat, pdfEngine) {
-    const needs = { image: false, file: false };
-    if (!chat)
-      return needs;
-    const engine = chat.settings.pdfEngine ?? pdfEngine;
-    for (const ref of [...chat.messages.flatMap((message) => message.attachments), ...chat.pending]) {
-      if (ref.kind === "image")
-        needs.image = true;
-      if (ref.kind === "file" && engine === "native")
-        needs.file = true;
-    }
-    return needs;
-  }
-  function modelCovers(model, needs) {
-    return (!needs.image || acceptsImage(model)) && (!needs.file || acceptsFile(model));
-  }
-  function setModel(ctx, models, id, record) {
-    const needs = chatNeeds(ctx.chat, ctx.config.pdfEngine);
-    let suffix = "";
-    if (record && !modelCovers(record, needs)) {
-      const fallbackId = ctx.config.visionFallbackModel;
-      const fallback = fallbackId === "" ? null : models.find((model) => model.id === fallbackId) ?? null;
-      if (!fallback || !modelCovers(fallback, needs)) {
-        const what = needs.image && needs.file ? "images and PDFs" : needs.image ? "images" : "PDFs";
-        return `**${record.name}** cannot read the ${what} already in this chat, and no vision fallback model is set. The model was not changed. Start a \`/new\` chat or pick a model that accepts ${what}.`;
+    let run = [];
+    const flush = () => {
+      if (run.length > 0) {
+        parts.push(String.fromCharCode(...run));
+        run = [];
       }
-      suffix = ` Requests that include ${needs.image ? "images" : "PDFs"} will use ${fallback.name} instead.`;
-    }
-    const chat = ctx.ensureChat();
-    mutateChat(ctx.host, chat.id, (current) => {
-      current.model = id;
-    });
-    setLastModel(ctx.host, id);
-    return `Chat model: **${record?.name ?? id}** (\`${id}\`).${suffix}`;
-  }
-  var model = {
-    usage: "/model [query | id | default]",
-    help: "Show or change this chat's model; a query lists matches",
-    run(ctx, args) {
-      const catalog = ensureCatalog(ctx.host);
-      const settings = getSettings(ctx.host);
-      const defaultId = settings.defaultModel ?? ctx.config.defaultModel;
-      if (args === "") {
-        const current = ctx.chat?.model;
-        return { kind: "notice", text: current ? `Chat model: \`${current}\`. Default: \`${defaultId}\`.` : `Chat model: the default, \`${defaultId}\`.` };
-      }
-      if (args.toLowerCase() === "default") {
-        const chat = ctx.ensureChat();
-        mutateChat(ctx.host, chat.id, (current) => {
-          current.model = null;
-        });
-        return { kind: "notice", text: `This chat now uses the default model, \`${defaultId}\`.` };
-      }
-      const exact = catalog.models.find((m) => m.id.toLowerCase() === args.toLowerCase());
-      if (exact)
-        return { kind: "notice", text: setModel(ctx, catalog.models, exact.id, exact) };
-      if (catalog.models.length === 0 && /^[^\s/]+\/[^\s]+$/.test(args)) {
-        return { kind: "notice", text: setModel(ctx, catalog.models, args, null) };
-      }
-      const matches = searchModels(catalog.models, args, { favorites: settings.favorites, limit: 8 });
-      if (matches.length === 0) {
-        return { kind: "notice", text: `No model matches \`${args}\`.${catalog.note ? ` ${catalog.note}.` : ""} Try the \`aimodels\` keyword to browse.` };
-      }
-      const lines = matches.map((m) => `- \`${m.id}\` — ${m.name} · ${formatSubtitle(m)}`);
-      return { kind: "notice", text: [`**Models matching \`${args}\`**`, ...lines, "", "Use `/model <id>` to pick one."].join(`
-`) };
-    }
-  };
-  var feature = { commands: { model } };
-
-  // src/features/attachments.ts
-  var PDF_ENGINES = ["auto", "free", "ocr", "native"];
-  function snapshotBytes(ctx, ref) {
-    const path = `${chatDir(ctx.host, ctx.chat.id)}/${ref.file}`;
-    return ctx.host.exists(path) ? ctx.host.readBytesFrom(path, 0) : null;
-  }
-  function withAttachments(ctx, turn, refs, needs) {
-    const parts = [];
-    let content = turn.content;
-    for (const ref of refs) {
-      const bytes = snapshotBytes(ctx, ref);
-      if (bytes === null)
-        return `The attachment **${ref.name}** is missing from this chat's saved files (${ref.file}), so nothing was sent. Remove it with \`/detach\` or attach it again.`;
-      if (ref.kind === "text") {
-        content += `
-
-<attached_file name="${ref.name}">
-${decodeUtf8(bytes)}
-</attached_file>`;
-      } else {
-        if (ref.kind === "image")
-          needs.image = true;
-        else if (ctx.options.pdfEngine === "native")
-          needs.file = true;
-        parts.push({ kind: ref.kind, name: ref.name, mime: ref.mime, base64: encodeBase64(bytes) });
-      }
-    }
-    return { ...turn, content, ...parts.length > 0 ? { attachments: parts } : {} };
-  }
-  function payloadOptions(ctx) {
-    const offset = ctx.turns[0]?.role === "system" ? 1 : 0;
-    const turns = ctx.turns.slice();
-    const needs = { image: false, file: false };
-    for (let i = 0;i < ctx.window.length; i++) {
-      const refs = ctx.window[i].attachments;
-      if (refs.length === 0)
-        continue;
-      const built = withAttachments(ctx, turns[offset + i], refs, needs);
-      if (typeof built === "string")
-        return { refuse: built };
-      turns[offset + i] = built;
-    }
-    if (ctx.draft.attachments.length > 0) {
-      const last = turns.length - 1;
-      const built = withAttachments(ctx, turns[last], ctx.draft.attachments, needs);
-      if (typeof built === "string")
-        return { refuse: built };
-      turns[last] = built;
-    }
-    if (!needs.image && !needs.file)
-      return { turns };
-    if (!ctx.model || modelCovers(ctx.model, needs))
-      return { turns };
-    const fallback = ctx.config.visionFallbackModel === "" ? null : getModel(ctx.host, ctx.config.visionFallbackModel);
-    const what = needs.image && needs.file ? "images and PDFs" : needs.image ? "images" : "PDFs";
-    if (fallback && modelCovers(fallback, needs)) {
-      return { turns, options: { modelId: fallback.id, model: fallback }, notes: [`${what} sent to ${fallback.id}`] };
-    }
-    return {
-      refuse: `**${ctx.model.name}** cannot read the ${what} in this message or chat, and no vision fallback model is set. Nothing was sent and your text is still in the input. Switch with \`/model\`, set a vision fallback model in Configuration, or start a \`/new\` chat.`
     };
-  }
-  function summarize(result) {
-    const lines = [];
-    if (result.added.length > 0)
-      lines.push(`Attached: ${result.added.map((ref) => `${ref.name} (${formatSize(ref.size)})`).join(", ")}. They go with your next message.`);
-    for (const error of result.errors)
-      lines.push(`⚠ ${error}`);
-    return lines.length > 0 ? lines.join(`
-
-`) : "Nothing was attached.";
-  }
-  var attach = {
-    usage: "/attach",
-    help: "Choose files to send with your next message",
-    run(ctx) {
-      let picked;
-      try {
-        picked = ctx.host.chooseFiles({ prompt: "Choose files to attach", multiple: true });
-      } catch {
-        return { kind: "notice", text: "The file picker could not open. Use the **AI Chat: Ask about these files** Universal Action on the files in Alfred instead." };
+    const push = (codePoint) => {
+      if (codePoint > 65535) {
+        const offset = codePoint - 65536;
+        run.push(55296 + (offset >> 10), 56320 + (offset & 1023));
+      } else {
+        run.push(codePoint);
       }
-      if (picked.cancelled)
-        return { kind: "notice", text: "No file was chosen." };
-      const chat = ctx.ensureChat();
-      return { kind: "notice", text: summarize(attachPaths(ctx.host, ctx.config, chat.id, picked.paths)) };
-    }
-  };
-  var paste = {
-    usage: "/paste",
-    help: "Attach the image on the clipboard",
-    run(ctx) {
-      const bytes = ctx.host.clipboardPng();
-      if (bytes === null)
-        return { kind: "notice", text: "There is no image on the clipboard." };
-      const chat = ctx.ensureChat();
-      return { kind: "notice", text: summarize(attachBytes(ctx.host, ctx.config, chat.id, `clipboard-${ctx.host.nowMs()}.png`, bytes)) };
-    }
-  };
-  var attachments = {
-    usage: "/attachments",
-    help: "List the files waiting to be sent",
-    run(ctx) {
-      const pending = ctx.chat?.pending ?? [];
-      if (pending.length === 0)
-        return { kind: "notice", text: "No files are waiting. Use `/attach`, `/paste`, or the **AI Chat: Ask about these files** action." };
-      return { kind: "notice", text: ["**Waiting to be sent**", ...pending.map((ref, i) => `${i + 1}. ${ref.name} (${formatSize(ref.size)})`), "", "Remove one with `/detach <number>`."].join(`
-`) };
-    }
-  };
-  var detach = {
-    usage: "/detach <number>",
-    help: "Remove a waiting file",
-    run(ctx, args) {
-      const pending = ctx.chat?.pending ?? [];
-      const index = Number(args) - 1;
-      if (!ctx.chat || !Number.isInteger(index) || index < 0 || index >= pending.length) {
-        return { kind: "notice", text: pending.length === 0 ? "No files are waiting." : `Give a number from 1 to ${pending.length}. See \`/attachments\`.` };
+      if (run.length >= 4096)
+        flush();
+    };
+    let i = 0;
+    while (i < bytes.length) {
+      const lead = bytes[i];
+      if (lead < 128) {
+        push(lead);
+        i += 1;
+      } else if (lead >= 194 && lead <= 223) {
+        if (continuation(bytes, i + 1)) {
+          push((lead & 31) << 6 | bytes[i + 1] & 63);
+          i += 2;
+        } else {
+          push(65533);
+          i += 1;
+        }
+      } else if (lead >= 224 && lead <= 239) {
+        const low = lead === 224 ? 160 : 128;
+        const high = lead === 237 ? 159 : 191;
+        if (!continuation(bytes, i + 1, low, high)) {
+          push(65533);
+          i += 1;
+        } else if (!continuation(bytes, i + 2)) {
+          push(65533);
+          i += 2;
+        } else {
+          push((lead & 15) << 12 | (bytes[i + 1] & 63) << 6 | bytes[i + 2] & 63);
+          i += 3;
+        }
+      } else if (lead >= 240 && lead <= 244) {
+        const low = lead === 240 ? 144 : 128;
+        const high = lead === 244 ? 143 : 191;
+        if (!continuation(bytes, i + 1, low, high)) {
+          push(65533);
+          i += 1;
+        } else if (!continuation(bytes, i + 2)) {
+          push(65533);
+          i += 2;
+        } else if (!continuation(bytes, i + 3)) {
+          push(65533);
+          i += 3;
+        } else {
+          push((lead & 7) << 18 | (bytes[i + 1] & 63) << 12 | (bytes[i + 2] & 63) << 6 | bytes[i + 3] & 63);
+          i += 4;
+        }
+      } else {
+        push(65533);
+        i += 1;
       }
-      const removed = pending[index];
-      mutateChat(ctx.host, ctx.chat.id, (chat) => {
-        chat.pending.splice(index, 1);
-      });
-      return { kind: "notice", text: `Removed ${removed.name}.` };
     }
-  };
-  var pdf = {
-    usage: "/pdf [auto | free | ocr | native]",
-    help: "Choose how PDFs are read; ocr is billed per page",
-    run(ctx, args) {
-      const engine = args.toLowerCase();
-      if (engine === "") {
-        const current = ctx.chat?.settings.pdfEngine ?? ctx.config.pdfEngine;
-        return { kind: "notice", text: `PDF engine: **${current}**. Choose with \`/pdf ${PDF_ENGINES.join("|")}\`. \`auto\` sends the PDF to models that read files and uses the free parser otherwise; \`ocr\` uses Mistral OCR, which OpenRouter bills per page.` };
-      }
-      if (PDF_ENGINES.indexOf(engine) < 0)
-        return { kind: "notice", text: `Unknown PDF engine \`${args}\`. Use ${PDF_ENGINES.map((e) => `\`${e}\``).join(", ")}.` };
-      const chat = ctx.ensureChat();
-      mutateChat(ctx.host, chat.id, (current) => {
-        current.settings.pdfEngine = engine;
-      });
-      return { kind: "notice", text: `PDF engine for this chat: **${engine}**${engine === "ocr" ? " (billed per page by OpenRouter)" : ""}.` };
-    }
-  };
-  var feature2 = {
-    commands: { attach, paste, attachments, detach, pdf },
-    payloadOptions,
-    validateBody(_ctx, body) {
-      return body.length > MAX_BODY_BYTES ? `The message with its files is ${megabytes(body.length)} once encoded, over the ${megabytes(MAX_BODY_BYTES).replace(".0", "")} limit. Nothing was sent; detach a file with \`/detach\`.` : null;
-    },
-    footerFlags(ctx) {
-      const flags = [];
-      const notice = ctx.host.env.attach_notice;
-      if (notice)
-        flags.push(`⚠ ${notice}`);
-      if ((ctx.chat?.settings.pdfEngine ?? ctx.config.pdfEngine) === "ocr")
-        flags.push("pdf ocr");
-      const pending = ctx.chat?.pending ?? [];
-      if (pending.length > 0)
-        flags.push(`\uD83D\uDCCE ${pending.length} waiting (${formatSize(pending.reduce((sum, ref) => sum + ref.size, 0))})`);
-      return flags;
-    }
-  };
-
-  // src/core/titles.ts
-  var MAX_WORDS = 6;
-  function cleanTitle(reply) {
-    const firstLine = reply.split(`
-`).find((line) => line.trim() !== "") ?? "";
-    const stripped = firstLine.replace(/^#+\s*/, "").replace(/^(title:\s*)/i, "").replace(/^["'“”‘’`*_]+|["'“”‘’`*_]+$/g, "").trim();
-    const words = stripped.split(/\s+/).filter((word) => word !== "");
-    return words.slice(0, MAX_WORDS).join(" ").replace(/[.,;:!?…]+$/, "");
-  }
-  var TITLE_PROMPT = "Write a title of at most six words for the conversation below. Reply with only the title: no quotes, no trailing punctuation.";
-  function fileSafe(title) {
-    const cleaned = title.replace(/[\\/:*?"<>|\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80);
-    return cleaned === "" ? "Chat" : cleaned;
+    flush();
+    return parts.join("");
   }
 
   // src/core/sse.ts
@@ -1887,7 +925,7 @@ ${decodeUtf8(bytes)}
       return host.nowMs() - record.startedAt > NO_PID_YET_MS;
     return ownedPid(host, record) === null && host.nowMs() - Math.max(record.lastGrowthAt, record.startedAt) > PID_GRACE_MS;
   }
-  function curlArgs2(host, input, files) {
+  function curlArgs(host, input, files) {
     const args = [curlPath(host), "-o", files.out, "-D", files.headers, "--silent", "--show-error", "--connect-timeout", "15"];
     if (input.stream)
       args.push("--no-buffer", "--speed-limit", "1", "--speed-time", String(input.timeoutSeconds));
@@ -1958,7 +996,7 @@ ${decodeUtf8(bytes)}
             throw error;
         }
       }
-      host.spawnSupervised(curlArgs2(host, input, files), { pid: files.pid, exit: files.exit, stderr: files.stderr });
+      host.spawnSupervised(curlArgs(host, input, files), { pid: files.pid, exit: files.exit, stderr: files.stderr });
       return { ok: true, rid };
     });
   }
@@ -2218,10 +1256,1053 @@ ${decodeUtf8(bytes)}
     return { sentinel: true, signalled: pid !== null ? host.signalTerm(pid) : false };
   }
 
+  // src/store/web-query.ts
+  var TIMEOUT_SECONDS = 8;
+  function standaloneMessage(host, apiKey, modelId, history, text) {
+    if (history.length === 0 || text.trim() === "" || text.length > MAX_REWRITE_INPUT || modelId === "")
+      return null;
+    const folder = `${dataDir(host)}/web-query`;
+    const bodyFile = `${folder}/${host.randomId()}.json`;
+    try {
+      host.mkdirp(folder);
+      host.writeAtomic(bodyFile, encodeBody({ ...buildBody(rewriteTurns(history, text), { modelId, model: null, stream: false, pdfEngine: "auto", web: false }), max_tokens: 200, temperature: 0 }));
+      const run = host.runSync([
+        host.env.aichat_curl ?? "/usr/bin/curl",
+        "--silent",
+        "--connect-timeout",
+        "5",
+        "--max-time",
+        String(TIMEOUT_SECONDS),
+        "-H",
+        "Content-Type: application/json",
+        "-H",
+        `Authorization: Bearer ${apiKey}`,
+        "-H",
+        `HTTP-Referer: ${REFERER}`,
+        "-H",
+        "X-Title: Alfred AI Chat",
+        "--data-binary",
+        `@${bodyFile}`,
+        chatUrl(host.env)
+      ], { timeoutMs: (TIMEOUT_SECONDS + 2) * 1000 });
+      if (run.exit !== 0)
+        return null;
+      const parsed = JSON.parse(run.stdout);
+      const content = parsed.choices?.[0]?.message?.content;
+      return typeof content === "string" ? cleanRewrite(content, text) : null;
+    } catch {
+      return null;
+    } finally {
+      try {
+        host.remove(bodyFile);
+      } catch {}
+    }
+  }
+
+  // src/core/system-prompt.ts
+  var WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  var MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  var two = (value) => String(value).padStart(2, "0");
+  function formatNow(info) {
+    const local = new Date(info.nowMs - info.offsetMinutes * 60000);
+    const offset = -info.offsetMinutes;
+    const sign = offset < 0 ? "-" : "+";
+    const zone = `UTC${sign}${two(Math.floor(Math.abs(offset) / 60))}:${two(Math.abs(offset) % 60)}${info.timezone ? `, ${info.timezone}` : ""}`;
+    return `${WEEKDAYS[local.getUTCDay()]}, ${local.getUTCDate()} ${MONTHS[local.getUTCMonth()]} ${local.getUTCFullYear()}, ${two(local.getUTCHours())}:${two(local.getUTCMinutes())} (${zone})`;
+  }
+  function contextLine(info) {
+    const facts = [`Current date and time: ${formatNow(info)}.`];
+    if (info.locale)
+      facts.push(`The user's locale is ${info.locale}.`);
+    if (info.os)
+      facts.push(`The user is on macOS ${info.os}.`);
+    return facts.join(" ");
+  }
+  var WEB_LINE = "Web search is on. Cite sources inline as Markdown links on the claim they support, and do not add a separate list of sources at the end.";
+  function composeSystemPrompt(parts) {
+    return [parts.base.trim(), parts.context ?? "", parts.web ? WEB_LINE : ""].filter((part) => part !== "").join(`
+
+`);
+  }
+
+  // src/core/favicons.ts
+  function domainOf(url) {
+    const match = /^https?:\/\/([^/:?#\s]+)/i.exec(url.trim());
+    if (!match)
+      return null;
+    const host = match[1].toLowerCase().replace(/^www\./, "").replace(/\.$/, "");
+    return isSafeDomain(host) ? host : null;
+  }
+  function isSafeDomain(host) {
+    if (host.length < 4 || host.length > 253)
+      return false;
+    if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(host))
+      return false;
+    if (/^\d+(\.\d+)*$/.test(host) || /^[0-9]+$/.test(host.slice(host.lastIndexOf(".") + 1)))
+      return false;
+    const last = host.slice(host.lastIndexOf(".") + 1);
+    if (["local", "localhost", "internal", "lan", "home", "corp", "intranet", "test", "invalid", "example"].indexOf(last) >= 0)
+      return false;
+    return true;
+  }
+  var MAX_ICON_BYTES = 64 * 1024;
+  function startsWith(bytes, signature) {
+    return bytes.length >= signature.length && signature.every((value, i) => bytes[i] === value);
+  }
+  function isRasterIcon(bytes) {
+    if (bytes.length === 0 || bytes.length > MAX_ICON_BYTES)
+      return false;
+    return startsWith(bytes, [137, 80, 78, 71, 13, 10, 26, 10]) || startsWith(bytes, [0, 0, 1, 0]) || startsWith(bytes, [71, 73, 70, 56]) || startsWith(bytes, [255, 216, 255]);
+  }
+  function labelOf(url) {
+    const domain = domainOf(url);
+    const host = domain ?? (/^https?:\/\/([^/?#]+)/i.exec(url)?.[1] ?? "link");
+    return host.replace(/([\\_*`\[\]])/g, "\\$1");
+  }
+  function sourcesRow(sources, style) {
+    const seen = new Set;
+    const unique = sources.filter((source) => {
+      const key = labelOf(source.url);
+      if (seen.has(key))
+        return false;
+      seen.add(key);
+      return true;
+    });
+    const shown = unique.slice(0, style.cap);
+    const links = shown.map((source) => {
+      const domain = domainOf(source.url);
+      const icon = style.icons && domain !== null ? style.icon(domain) : null;
+      const link = `[${labelOf(source.url)}](${source.url.replace(/\s/g, "%20").replace(/\(/g, "%28").replace(/\)/g, "%29")})`;
+      return icon === null ? link : `![](${icon}) ${link}`;
+    });
+    const more = unique.length > shown.length ? `  ·  +${unique.length - shown.length} more with \`/sources\`` : "";
+    return `**Sources**  ${links.join("  ·  ")}${more}`;
+  }
+
+  // src/core/transcript.ts
+  var YOU_HEADING = "# \uD83E\uDDD1 You";
+  var ASSISTANT_HEADING = "# \uD83E\uDD16 Assistant";
+  var TURN_BREAK = "---";
+  function formatSize(bytes) {
+    if (bytes < 1024)
+      return `${bytes} B`;
+    if (bytes < 1024 * 1024)
+      return `${Math.round(bytes / 1024)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  function sourcesOf(message) {
+    const seen = new Set;
+    const sources = [];
+    for (const annotation of message.annotations ?? []) {
+      if (annotation.type !== "url_citation")
+        continue;
+      const inner = typeof annotation.url_citation === "object" && annotation.url_citation !== null ? annotation.url_citation : annotation;
+      const url = typeof inner.url === "string" ? inner.url : "";
+      if (url === "" || seen.has(url))
+        continue;
+      seen.add(url);
+      sources.push({ url, title: typeof inner.title === "string" && inner.title !== "" ? inner.title : url });
+    }
+    return sources;
+  }
+  function quote(text) {
+    return text.split(`
+`).map((line) => line === "" ? ">" : `> ${line}`).join(`
+`);
+  }
+  function renderMessage(message, style) {
+    const parts = [message.role === "user" ? YOU_HEADING : ASSISTANT_HEADING];
+    if (message.reasoning)
+      parts.push(quote(message.reasoning.trim()));
+    if (message.content !== "")
+      parts.push(message.content);
+    for (const attachment of message.attachments)
+      parts.push(`\uD83D\uDCCE ${attachment.name} (${formatSize(attachment.size)})`);
+    const sources = sourcesOf(message);
+    if (sources.length > 0) {
+      parts.push(style ? sourcesRow(sources, style) : ["**Sources**", ...sources.map((source) => `- [${source.title}](${source.url})`)].join(`
+`));
+    }
+    if (message.status === "interrupted")
+      parts.push(`_⚠ Interrupted${message.error ? `: ${message.error}` : ""}. Send "continue" to get the rest._`);
+    if (message.status === "stopped")
+      parts.push('_■ Stopped. Send "continue" to get the rest._');
+    return parts.join(`
+
+`);
+  }
+  function renderTranscript(chat, style) {
+    return chat.messages.map((message, i) => `${message.role === "user" && i > 0 ? `${TURN_BREAK}
+
+` : ""}${renderMessage(message, style)}`).join(`
+
+`);
+  }
+  function lastReply(chat) {
+    for (let i = chat.messages.length - 1;i >= 0; i--)
+      if (chat.messages[i].role === "assistant")
+        return chat.messages[i];
+    return null;
+  }
+
+  // src/core/attachments.ts
+  var MAX_FILE_BYTES = 20 * 1024 * 1024;
+  var MAX_PENDING = 8;
+  var MAX_BODY_BYTES = 32 * 1024 * 1024;
+  var IMAGE_MIME = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif" };
+  function extensionOf(name) {
+    const dot = name.lastIndexOf(".");
+    return dot > 0 && dot < name.length - 1 ? name.slice(dot + 1).toLowerCase().replace(/[^a-z0-9]/g, "") : "";
+  }
+  function baseName(path) {
+    const slash = path.lastIndexOf("/");
+    return slash >= 0 ? path.slice(slash + 1) : path;
+  }
+  function classifyName(name) {
+    const ext = extensionOf(name);
+    const image = IMAGE_MIME[ext];
+    if (image)
+      return { kind: "image", ext: ext === "jpeg" ? "jpg" : ext, mime: image };
+    if (ext === "pdf")
+      return { kind: "file", ext, mime: "application/pdf" };
+    return { kind: "unknown", ext: ext === "" ? "txt" : ext, mime: "text/plain" };
+  }
+  function looksLikeText(bytes) {
+    const sample = Math.min(bytes.length, 8192);
+    for (let i = 0;i < sample; i++)
+      if (bytes[i] === 0)
+        return false;
+    return true;
+  }
+  function megabytes(bytes) {
+    return `${Number((bytes / (1024 * 1024)).toFixed(1))} MB`;
+  }
+
+  // src/core/base64.ts
+  var ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  var LOOKUP = (() => {
+    const table = new Array(128).fill(-1);
+    for (let i = 0;i < ALPHABET.length; i++)
+      table[ALPHABET.charCodeAt(i)] = i;
+    return table;
+  })();
+  function encodeBase64(bytes) {
+    const parts = [];
+    for (let i = 0;i < bytes.length; i += 3) {
+      const a = bytes[i];
+      const b = i + 1 < bytes.length ? bytes[i + 1] : 0;
+      const c = i + 2 < bytes.length ? bytes[i + 2] : 0;
+      const chunk = a << 16 | b << 8 | c;
+      parts.push(ALPHABET[chunk >> 18 & 63] + ALPHABET[chunk >> 12 & 63] + (i + 1 < bytes.length ? ALPHABET[chunk >> 6 & 63] : "=") + (i + 2 < bytes.length ? ALPHABET[chunk & 63] : "="));
+    }
+    return parts.join("");
+  }
+  function decodeBase64(text) {
+    const symbols = [];
+    for (let i = 0;i < text.length; i++) {
+      const code = text.charCodeAt(i);
+      if (code === 61)
+        break;
+      if (code === 10 || code === 13 || code === 32 || code === 9)
+        continue;
+      const value = code < 128 ? LOOKUP[code] : -1;
+      if (value < 0)
+        throw new Error(`invalid base64 character at ${i}`);
+      symbols.push(value);
+    }
+    if (symbols.length % 4 === 1)
+      throw new Error("invalid base64 length");
+    const out = new Uint8Array(Math.floor(symbols.length * 3 / 4));
+    let o = 0;
+    for (let i = 0;i < symbols.length; i += 4) {
+      const s0 = symbols[i];
+      const s1 = symbols[i + 1];
+      const s2 = i + 2 < symbols.length ? symbols[i + 2] : 0;
+      const s3 = i + 3 < symbols.length ? symbols[i + 3] : 0;
+      const chunk = s0 << 18 | s1 << 12 | s2 << 6 | s3;
+      if (o < out.length)
+        out[o++] = chunk >> 16 & 255;
+      if (o < out.length)
+        out[o++] = chunk >> 8 & 255;
+      if (o < out.length)
+        out[o++] = chunk & 255;
+    }
+    return out;
+  }
+
+  // src/core/sha256.ts
+  var K = [
+    1116352408,
+    1899447441,
+    3049323471,
+    3921009573,
+    961987163,
+    1508970993,
+    2453635748,
+    2870763221,
+    3624381080,
+    310598401,
+    607225278,
+    1426881987,
+    1925078388,
+    2162078206,
+    2614888103,
+    3248222580,
+    3835390401,
+    4022224774,
+    264347078,
+    604807628,
+    770255983,
+    1249150122,
+    1555081692,
+    1996064986,
+    2554220882,
+    2821834349,
+    2952996808,
+    3210313671,
+    3336571891,
+    3584528711,
+    113926993,
+    338241895,
+    666307205,
+    773529912,
+    1294757372,
+    1396182291,
+    1695183700,
+    1986661051,
+    2177026350,
+    2456956037,
+    2730485921,
+    2820302411,
+    3259730800,
+    3345764771,
+    3516065817,
+    3600352804,
+    4094571909,
+    275423344,
+    430227734,
+    506948616,
+    659060556,
+    883997877,
+    958139571,
+    1322822218,
+    1537002063,
+    1747873779,
+    1955562222,
+    2024104815,
+    2227730452,
+    2361852424,
+    2428436474,
+    2756734187,
+    3204031479,
+    3329325298
+  ];
+  function rotr(x, n) {
+    return x >>> n | x << 32 - n;
+  }
+  function sha256Hex(bytes) {
+    const length = bytes.length;
+    const padded = new Uint8Array(length + 9 + 63 >> 6 << 6);
+    padded.set(bytes);
+    padded[length] = 128;
+    const bitsHigh = Math.floor(length / 536870912);
+    const bitsLow = length << 3 >>> 0;
+    const view = new DataView(padded.buffer);
+    view.setUint32(padded.length - 8, bitsHigh);
+    view.setUint32(padded.length - 4, bitsLow);
+    const h = [1779033703, 3144134277, 1013904242, 2773480762, 1359893119, 2600822924, 528734635, 1541459225];
+    const w = new Array(64);
+    for (let offset = 0;offset < padded.length; offset += 64) {
+      for (let i = 0;i < 16; i++)
+        w[i] = view.getUint32(offset + i * 4);
+      for (let i = 16;i < 64; i++) {
+        const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ w[i - 15] >>> 3;
+        const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ w[i - 2] >>> 10;
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1 | 0;
+      }
+      let [a, b, c, d, e, f, g, hh] = h;
+      for (let i = 0;i < 64; i++) {
+        const s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+        const ch = e & f ^ ~e & g;
+        const t1 = hh + s1 + ch + K[i] + w[i] | 0;
+        const s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+        const maj = a & b ^ a & c ^ b & c;
+        const t2 = s0 + maj | 0;
+        hh = g;
+        g = f;
+        f = e;
+        e = d + t1 | 0;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2 | 0;
+      }
+      h[0] = h[0] + a | 0;
+      h[1] = h[1] + b | 0;
+      h[2] = h[2] + c | 0;
+      h[3] = h[3] + d | 0;
+      h[4] = h[4] + e | 0;
+      h[5] = h[5] + f | 0;
+      h[6] = h[6] + g | 0;
+      h[7] = h[7] + hh | 0;
+    }
+    return h.map((word) => (word >>> 0).toString(16).padStart(8, "0")).join("");
+  }
+
+  // src/store/attach.ts
+  function downscaled(host, config, path, classified) {
+    if (classified.kind !== "image" || classified.ext !== "png" && classified.ext !== "jpg")
+      return null;
+    let probe;
+    try {
+      probe = host.runSync(["/usr/bin/sips", "-g", "pixelWidth", "-g", "pixelHeight", path], { timeoutMs: 15000 });
+    } catch {
+      return null;
+    }
+    if (probe.exit !== 0)
+      return null;
+    const width = Number(/pixelWidth:\s*(\d+)/.exec(probe.stdout)?.[1] ?? 0);
+    const height = Number(/pixelHeight:\s*(\d+)/.exec(probe.stdout)?.[1] ?? 0);
+    if (Math.max(width, height) <= config.imageMaxEdge)
+      return null;
+    host.mkdirp(cacheDir(host));
+    const temp = `${cacheDir(host)}/resize-${host.randomId()}.${classified.ext}`;
+    try {
+      const result = host.runSync(["/usr/bin/sips", "-Z", String(config.imageMaxEdge), path, "--out", temp], { timeoutMs: 30000 });
+      return result.exit === 0 && host.exists(temp) ? host.readBytesFrom(temp, 0) : null;
+    } catch {
+      return null;
+    } finally {
+      host.remove(temp);
+    }
+  }
+  function snapshot(host, chatId, source) {
+    const sha = sha256Hex(source.bytes);
+    const file = `attachments/${sha}.${source.classified.ext}`;
+    const dir = attachmentsDir(host, chatId);
+    host.mkdirExclusive(dir);
+    const target = `${dir}/${sha}.${source.classified.ext}`;
+    if (!host.exists(target))
+      host.writeAtomic(target, source.bytes);
+    return {
+      name: source.name,
+      kind: source.classified.kind === "unknown" ? "text" : source.classified.kind,
+      mime: source.classified.mime,
+      size: source.bytes.length,
+      sha,
+      file
+    };
+  }
+  function prepareOne(host, config, path) {
+    const name = baseName(path);
+    const info = host.stat(path);
+    if (!info)
+      return `${name}: the file does not exist`;
+    if (info.isDirectory)
+      return `${name}: folders cannot be attached`;
+    if (info.size > MAX_FILE_BYTES)
+      return `${name}: ${megabytes(info.size)} is over the 20 MB per-file cap`;
+    const classified = classifyName(name);
+    let bytes = host.readBytesFrom(path, 0);
+    if (classified.kind === "unknown") {
+      if (bytes.length > config.textAttachmentMaxKb * 1024)
+        return `${name}: text files are limited to ${config.textAttachmentMaxKb} KB`;
+      if (!looksLikeText(bytes))
+        return `${name}: this file type cannot be read; attach images, PDFs, or text files`;
+      decodeUtf8(bytes);
+      return { name, bytes, classified: { kind: "unknown", ext: classified.ext, mime: "text/plain" } };
+    }
+    const smaller = downscaled(host, config, path, classified);
+    if (smaller)
+      bytes = smaller;
+    return { name, bytes, classified };
+  }
+  function attachPaths(host, config, chatId, paths) {
+    const result = { added: [], errors: [] };
+    const chatPending = () => {
+      let count = 0;
+      mutateChat(host, chatId, (chat) => {
+        count = chat.pending.length;
+        return false;
+      });
+      return count;
+    };
+    let pending = chatPending();
+    for (const path of paths) {
+      if (pending + result.added.length >= MAX_PENDING) {
+        result.errors.push(`${baseName(path)}: a message can carry ${MAX_PENDING} files; send it first or use /detach`);
+        continue;
+      }
+      const prepared = prepareOne(host, config, path);
+      if (typeof prepared === "string") {
+        result.errors.push(prepared);
+        continue;
+      }
+      result.added.push(snapshot(host, chatId, prepared));
+    }
+    if (result.added.length > 0) {
+      mutateChat(host, chatId, (chat) => {
+        for (const ref of result.added)
+          if (!chat.pending.some((p) => p.sha === ref.sha && p.name === ref.name))
+            chat.pending.push(ref);
+      });
+    }
+    return result;
+  }
+  function attachBytes(host, config, chatId, name, bytes) {
+    const classified = classifyName(name);
+    if (classified.kind !== "image")
+      return { added: [], errors: [`${name}: only images can be pasted`] };
+    if (bytes.length > MAX_FILE_BYTES)
+      return { added: [], errors: [`${name}: ${megabytes(bytes.length)} is over the 20 MB per-file cap`] };
+    const ref = snapshot(host, chatId, { name, bytes, classified });
+    let pending = 0;
+    mutateChat(host, chatId, (chat) => {
+      pending = chat.pending.length;
+      if (pending >= MAX_PENDING)
+        return false;
+      chat.pending.push(ref);
+    });
+    return pending >= MAX_PENDING ? { added: [], errors: [`${name}: a message can carry ${MAX_PENDING} files`] } : { added: [ref], errors: [] };
+  }
+
+  // src/store/catalog.ts
+  var CATALOG_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+  var RETRY_AFTER_FAILURE_MS = 10 * 60 * 1000;
+  var STUCK_REFRESH_MS = 2 * 60 * 1000;
+  var cacheFile = (host) => `${cacheDir(host)}/models.json`;
+  var transportDir = (host) => `${cacheDir(host)}/catalog`;
+  var part = (host) => `${transportDir(host)}/models.part`;
+  var files = (host) => ({
+    pid: `${transportDir(host)}/models.pid`,
+    exit: `${transportDir(host)}/models.exit`,
+    stderr: `${transportDir(host)}/models.stderr`,
+    headers: `${transportDir(host)}/models.headers`
+  });
+  var failedAt = (host) => `${transportDir(host)}/failed-at`;
+  var startedAt = (host) => `${transportDir(host)}/started-at`;
+  function curl(host) {
+    return host.env.aichat_curl ?? "/usr/bin/curl";
+  }
+  function curlArgs2(host, extra) {
+    return [
+      curl(host),
+      "-o",
+      part(host),
+      "-D",
+      files(host).headers,
+      "--silent",
+      "--show-error",
+      "--connect-timeout",
+      "10",
+      ...extra,
+      `${apiBase(host.env)}/models?output_modalities=all`
+    ];
+  }
+  function loadCatalog(host) {
+    try {
+      const parsed = JSON.parse(host.readText(cacheFile(host)));
+      if (typeof parsed.fetchedAt !== "number" || !Array.isArray(parsed.models))
+        return null;
+      return { fetchedAt: parsed.fetchedAt, models: parsed.models };
+    } catch {
+      return null;
+    }
+  }
+  function readTrimmed(host, path) {
+    try {
+      return host.readText(path).trim();
+    } catch {
+      return null;
+    }
+  }
+  function clearTransport(host) {
+    const f = files(host);
+    for (const path of [part(host), f.pid, f.exit, f.stderr, f.headers, startedAt(host)])
+      host.remove(path);
+  }
+  function installDownload(host, curlExit) {
+    if (curlExit !== 0)
+      return { ok: false, reason: mapCurlExit(curlExit).title };
+    const status = lastStatus(readTrimmed(host, files(host).headers) ?? "");
+    if (!status || status.status !== 200)
+      return { ok: false, reason: `HTTP ${status ? status.status : "?"}` };
+    let body;
+    try {
+      body = JSON.parse(host.readText(part(host)));
+    } catch {
+      return { ok: false, reason: "unreadable list" };
+    }
+    const data = typeof body === "object" && body !== null ? body.data : undefined;
+    if (!Array.isArray(data))
+      return { ok: false, reason: "unexpected list" };
+    const models = data.map(normalizeModel).filter((model) => model !== null);
+    host.writeAtomic(cacheFile(host), JSON.stringify({ fetchedAt: host.nowMs(), models }));
+    return { ok: true };
+  }
+  function refreshInFlight(host) {
+    if (host.exists(files(host).exit))
+      return false;
+    const started = Number(readTrimmed(host, startedAt(host)));
+    if (!Number.isFinite(started) || started <= 0)
+      return false;
+    if (host.nowMs() - started > STUCK_REFRESH_MS) {
+      clearTransport(host);
+      return false;
+    }
+    return true;
+  }
+  function ensureCatalog(host) {
+    host.mkdirp(transportDir(host));
+    const f = files(host);
+    let note = null;
+    const finished = readTrimmed(host, f.exit);
+    if (finished !== null) {
+      const result = installDownload(host, Number(finished));
+      clearTransport(host);
+      if (!result.ok) {
+        note = `Model list refresh failed (${result.reason}); showing the saved list`;
+        host.writeAtomic(failedAt(host), String(host.nowMs()));
+      } else {
+        host.remove(failedAt(host));
+      }
+    }
+    let cache = loadCatalog(host);
+    if (!cache) {
+      clearTransport(host);
+      const run = host.runSync(curlArgs2(host, ["--max-time", "10"]), { timeoutMs: 15000 });
+      const result = installDownload(host, run.exit);
+      clearTransport(host);
+      if (!result.ok)
+        return { models: [], note: `Could not load the model list (${result.reason})`, refreshing: false };
+      cache = loadCatalog(host);
+      return { models: cache ? cache.models : [], note: null, refreshing: false };
+    }
+    let refreshing = refreshInFlight(host);
+    if (!refreshing && host.nowMs() - cache.fetchedAt > CATALOG_MAX_AGE_MS) {
+      const failed = Number(readTrimmed(host, failedAt(host)) ?? 0);
+      if (host.nowMs() - failed > RETRY_AFTER_FAILURE_MS) {
+        clearTransport(host);
+        host.writeAtomic(startedAt(host), String(host.nowMs()));
+        host.spawnSupervised(curlArgs2(host, ["--max-time", "60"]), { pid: f.pid, exit: f.exit, stderr: f.stderr });
+        refreshing = true;
+      }
+    }
+    return { models: cache.models, note, refreshing };
+  }
+  function getModel(host, id) {
+    const cache = loadCatalog(host);
+    return cache ? cache.models.find((model) => model.id === id) ?? null : null;
+  }
+
+  // src/core/models-search.ts
+  function parseQuery(query) {
+    const parsed = { words: [], image: false, imagegen: false, file: false, free: false, reasoning: false };
+    for (const token of query.toLowerCase().split(/\s+/)) {
+      if (token === "")
+        continue;
+      if (token === "#image")
+        parsed.image = true;
+      else if (token === "#imagegen")
+        parsed.imagegen = true;
+      else if (token === "#file")
+        parsed.file = true;
+      else if (token === "#free")
+        parsed.free = true;
+      else if (token === "#reasoning")
+        parsed.reasoning = true;
+      else
+        parsed.words.push(token);
+    }
+    return parsed;
+  }
+  function wordScore(model, word) {
+    const id = model.id.toLowerCase();
+    const name = model.name.toLowerCase();
+    const slug = id.slice(id.indexOf("/") + 1);
+    if (id === word || slug === word)
+      return 100;
+    if (id.startsWith(word))
+      return 60;
+    if (slug.startsWith(word) || name.startsWith(word))
+      return 50;
+    if (name.split(/[\s:/()-]+/).some((part) => part.startsWith(word)) || slug.split(/[-_.:/]/).some((part) => part.startsWith(word)))
+      return 30;
+    if (id.includes(word) || name.includes(word))
+      return 10;
+    return 0;
+  }
+  function searchModels(models, query, options = {}) {
+    const parsed = parseQuery(query);
+    const favorites = options.favorites ?? [];
+    const ranked = [];
+    models.forEach((model, order) => {
+      if (parsed.image && !acceptsImage(model))
+        return;
+      if (parsed.imagegen && !producesImage(model))
+        return;
+      if (parsed.file && !acceptsFile(model))
+        return;
+      if (parsed.free && !isFree(model))
+        return;
+      if (parsed.reasoning && !supportsReasoning(model))
+        return;
+      let score = 0;
+      for (const word of parsed.words) {
+        const wordRank = wordScore(model, word);
+        if (wordRank === 0)
+          return;
+        score += wordRank;
+      }
+      ranked.push({ model, score, order });
+    });
+    ranked.sort((a, b) => {
+      const fa = favorites.indexOf(a.model.id);
+      const fb = favorites.indexOf(b.model.id);
+      if (fa >= 0 !== fb >= 0)
+        return fa >= 0 ? -1 : 1;
+      if (fa >= 0 && fb >= 0 && fa !== fb)
+        return fa - fb;
+      return b.score - a.score || a.order - b.order;
+    });
+    const found = ranked.map((entry) => entry.model);
+    return options.limit === undefined ? found : found.slice(0, options.limit);
+  }
+  function formatPrice(perMillionTokens) {
+    if (perMillionTokens === 0)
+      return "$0";
+    if (perMillionTokens >= 1)
+      return `$${Number(perMillionTokens.toFixed(2))}`;
+    return `$${Number(perMillionTokens.toPrecision(2))}`;
+  }
+  function formatContext(tokens) {
+    if (tokens >= 1e6)
+      return `${Number((tokens / 1e6).toFixed(1))}M`;
+    if (tokens >= 1000)
+      return `${Math.round(tokens / 1000)}k`;
+    return String(tokens);
+  }
+  function badges(model) {
+    const list = [];
+    if (acceptsImage(model))
+      list.push("\uD83D\uDDBC");
+    if (producesImage(model))
+      list.push("\uD83C\uDFA8");
+    if (acceptsFile(model))
+      list.push("\uD83D\uDCC4");
+    if (supportsReasoning(model))
+      list.push("\uD83E\uDDE0");
+    if (isFree(model))
+      list.push("\uD83C\uDD93");
+    return list.join(" ");
+  }
+  function formatSubtitle(model) {
+    const parts = [];
+    const marks = badges(model);
+    if (marks !== "")
+      parts.push(marks);
+    if (isFree(model))
+      parts.push("free");
+    else if (pricedPerUse(model))
+      parts.push(producesImage(model) ? "priced per image" : "priced per use");
+    else if (model.completionPrice === 0 && !model.outputModalities.includes("text"))
+      parts.push(`${formatPrice(perMillion(model.promptPrice))} in per 1M tokens`);
+    else
+      parts.push(`${formatPrice(perMillion(model.promptPrice))} in · ${formatPrice(perMillion(model.completionPrice))} out per 1M tokens`);
+    if (model.contextLength > 0)
+      parts.push(`${formatContext(model.contextLength)} context`);
+    return parts.join(" · ");
+  }
+
+  // src/store/settings.ts
+  function emptySettings() {
+    return { schema: 1, defaultModel: null, lastModel: null, favorites: [] };
+  }
+  function path(host) {
+    return `${dataDir(host)}/settings.json`;
+  }
+  function getSettings(host) {
+    try {
+      const parsed = JSON.parse(host.readText(path(host)));
+      return {
+        schema: 1,
+        defaultModel: typeof parsed.defaultModel === "string" ? parsed.defaultModel : null,
+        lastModel: typeof parsed.lastModel === "string" ? parsed.lastModel : null,
+        favorites: Array.isArray(parsed.favorites) ? parsed.favorites.filter((id) => typeof id === "string") : []
+      };
+    } catch {
+      return emptySettings();
+    }
+  }
+  function mutateSettings(host, fn) {
+    host.mkdirp(dataDir(host));
+    return withLock(host, `${dataDir(host)}/settings.lock`, () => {
+      const settings = getSettings(host);
+      fn(settings);
+      host.writeAtomic(path(host), JSON.stringify(settings, null, 2));
+      return settings;
+    });
+  }
+  function setLastModel(host, id) {
+    return mutateSettings(host, (settings) => {
+      settings.lastModel = id;
+    });
+  }
+
+  // src/features/model.ts
+  function chatNeeds(chat, pdfEngine) {
+    const needs = { image: false, file: false };
+    if (!chat)
+      return needs;
+    const engine = chat.settings.pdfEngine ?? pdfEngine;
+    for (const ref of [...chat.messages.flatMap((message) => message.attachments), ...chat.pending]) {
+      if (ref.kind === "image")
+        needs.image = true;
+      if (ref.kind === "file" && engine === "native")
+        needs.file = true;
+    }
+    return needs;
+  }
+  function modelCovers(model, needs) {
+    return (!needs.image || acceptsImage(model)) && (!needs.file || acceptsFile(model));
+  }
+  function setModel(ctx, models, id, record) {
+    const needs = chatNeeds(ctx.chat, ctx.config.pdfEngine);
+    let suffix = "";
+    if (record && !modelCovers(record, needs)) {
+      const fallbackId = ctx.config.visionFallbackModel;
+      const fallback = fallbackId === "" ? null : models.find((model) => model.id === fallbackId) ?? null;
+      if (!fallback || !modelCovers(fallback, needs)) {
+        const what = needs.image && needs.file ? "images and PDFs" : needs.image ? "images" : "PDFs";
+        return `**${record.name}** cannot read the ${what} already in this chat, and no vision fallback model is set. The model was not changed. Start a \`/new\` chat or pick a model that accepts ${what}.`;
+      }
+      suffix = ` Requests that include ${needs.image ? "images" : "PDFs"} will use ${fallback.name} instead.`;
+    }
+    const chat = ctx.ensureChat();
+    mutateChat(ctx.host, chat.id, (current) => {
+      current.model = id;
+    });
+    setLastModel(ctx.host, id);
+    return `Chat model: **${record?.name ?? id}** (\`${id}\`).${suffix}`;
+  }
+  var model = {
+    usage: "/model [query | id | default]",
+    help: "Show or change this chat's model; a query lists matches",
+    run(ctx, args) {
+      const catalog = ensureCatalog(ctx.host);
+      const settings = getSettings(ctx.host);
+      const defaultId = settings.defaultModel ?? ctx.config.defaultModel;
+      if (args === "") {
+        const current = ctx.chat?.model;
+        return { kind: "notice", text: current ? `Chat model: \`${current}\`. Default: \`${defaultId}\`.` : `Chat model: the default, \`${defaultId}\`.` };
+      }
+      if (args.toLowerCase() === "default") {
+        const chat = ctx.ensureChat();
+        mutateChat(ctx.host, chat.id, (current) => {
+          current.model = null;
+        });
+        return { kind: "notice", text: `This chat now uses the default model, \`${defaultId}\`.` };
+      }
+      const exact = catalog.models.find((m) => m.id.toLowerCase() === args.toLowerCase());
+      if (exact)
+        return { kind: "notice", text: setModel(ctx, catalog.models, exact.id, exact) };
+      if (catalog.models.length === 0 && /^[^\s/]+\/[^\s]+$/.test(args)) {
+        return { kind: "notice", text: setModel(ctx, catalog.models, args, null) };
+      }
+      const matches = searchModels(catalog.models, args, { favorites: settings.favorites, limit: 8 });
+      if (matches.length === 0) {
+        return { kind: "notice", text: `No model matches \`${args}\`.${catalog.note ? ` ${catalog.note}.` : ""} Try the \`aimodels\` keyword to browse.` };
+      }
+      const lines = matches.map((m) => `- \`${m.id}\` — ${m.name} · ${formatSubtitle(m)}`);
+      return { kind: "notice", text: [`**Models matching \`${args}\`**`, ...lines, "", "Use `/model <id>` to pick one."].join(`
+`) };
+    }
+  };
+  var feature = { commands: { model } };
+
+  // src/features/attachments.ts
+  var PDF_ENGINES = ["auto", "free", "ocr", "native"];
+  function snapshotBytes(ctx, ref) {
+    const path = `${chatDir(ctx.host, ctx.chat.id)}/${ref.file}`;
+    return ctx.host.exists(path) ? ctx.host.readBytesFrom(path, 0) : null;
+  }
+  function withAttachments(ctx, turn, refs, needs) {
+    const parts = [];
+    let content = turn.content;
+    for (const ref of refs) {
+      const bytes = snapshotBytes(ctx, ref);
+      if (bytes === null)
+        return `The attachment **${ref.name}** is missing from this chat's saved files (${ref.file}), so nothing was sent. Remove it with \`/detach\` or attach it again.`;
+      if (ref.kind === "text") {
+        content += `
+
+<attached_file name="${ref.name}">
+${decodeUtf8(bytes)}
+</attached_file>`;
+      } else {
+        if (ref.kind === "image")
+          needs.image = true;
+        else if (ctx.options.pdfEngine === "native")
+          needs.file = true;
+        parts.push({ kind: ref.kind, name: ref.name, mime: ref.mime, base64: encodeBase64(bytes) });
+      }
+    }
+    return { ...turn, content, ...parts.length > 0 ? { attachments: parts } : {} };
+  }
+  function payloadOptions(ctx) {
+    const offset = ctx.turns[0]?.role === "system" ? 1 : 0;
+    const turns = ctx.turns.slice();
+    const needs = { image: false, file: false };
+    for (let i = 0;i < ctx.window.length; i++) {
+      const refs = ctx.window[i].attachments;
+      if (refs.length === 0)
+        continue;
+      const built = withAttachments(ctx, turns[offset + i], refs, needs);
+      if (typeof built === "string")
+        return { refuse: built };
+      turns[offset + i] = built;
+    }
+    if (ctx.draft.attachments.length > 0) {
+      const last = turns.length - 1;
+      const built = withAttachments(ctx, turns[last], ctx.draft.attachments, needs);
+      if (typeof built === "string")
+        return { refuse: built };
+      turns[last] = built;
+    }
+    if (!needs.image && !needs.file)
+      return { turns };
+    if (!ctx.model || modelCovers(ctx.model, needs))
+      return { turns };
+    const fallback = ctx.config.visionFallbackModel === "" ? null : getModel(ctx.host, ctx.config.visionFallbackModel);
+    const what = needs.image && needs.file ? "images and PDFs" : needs.image ? "images" : "PDFs";
+    if (fallback && modelCovers(fallback, needs)) {
+      return { turns, options: { modelId: fallback.id, model: fallback }, notes: [`${what} sent to ${fallback.id}`] };
+    }
+    return {
+      refuse: `**${ctx.model.name}** cannot read the ${what} in this message or chat, and no vision fallback model is set. Nothing was sent and your text is still in the input. Switch with \`/model\`, set a vision fallback model in Configuration, or start a \`/new\` chat.`
+    };
+  }
+  function summarize(result) {
+    const lines = [];
+    if (result.added.length > 0)
+      lines.push(`Attached: ${result.added.map((ref) => `${ref.name} (${formatSize(ref.size)})`).join(", ")}. They go with your next message.`);
+    for (const error of result.errors)
+      lines.push(`⚠ ${error}`);
+    return lines.length > 0 ? lines.join(`
+
+`) : "Nothing was attached.";
+  }
+  var attach = {
+    usage: "/attach",
+    help: "Choose files to send with your next message",
+    run(ctx) {
+      let picked;
+      try {
+        picked = ctx.host.chooseFiles({ prompt: "Choose files to attach", multiple: true });
+      } catch {
+        return { kind: "notice", text: "The file picker could not open. Use the **AI Chat: Ask about these files** Universal Action on the files in Alfred instead." };
+      }
+      if (picked.cancelled)
+        return { kind: "notice", text: "No file was chosen." };
+      const chat = ctx.ensureChat();
+      return { kind: "notice", text: summarize(attachPaths(ctx.host, ctx.config, chat.id, picked.paths)) };
+    }
+  };
+  var paste = {
+    usage: "/paste",
+    help: "Attach the image on the clipboard",
+    run(ctx) {
+      const bytes = ctx.host.clipboardPng();
+      if (bytes === null)
+        return { kind: "notice", text: "There is no image on the clipboard." };
+      const chat = ctx.ensureChat();
+      return { kind: "notice", text: summarize(attachBytes(ctx.host, ctx.config, chat.id, `clipboard-${ctx.host.nowMs()}.png`, bytes)) };
+    }
+  };
+  var attachments = {
+    usage: "/attachments",
+    help: "List the files waiting to be sent",
+    run(ctx) {
+      const pending = ctx.chat?.pending ?? [];
+      if (pending.length === 0)
+        return { kind: "notice", text: "No files are waiting. Use `/attach`, `/paste`, or the **AI Chat: Ask about these files** action." };
+      return { kind: "notice", text: ["**Waiting to be sent**", ...pending.map((ref, i) => `${i + 1}. ${ref.name} (${formatSize(ref.size)})`), "", "Remove one with `/detach <number>`."].join(`
+`) };
+    }
+  };
+  var detach = {
+    usage: "/detach <number>",
+    help: "Remove a waiting file",
+    run(ctx, args) {
+      const pending = ctx.chat?.pending ?? [];
+      const index = Number(args) - 1;
+      if (!ctx.chat || !Number.isInteger(index) || index < 0 || index >= pending.length) {
+        return { kind: "notice", text: pending.length === 0 ? "No files are waiting." : `Give a number from 1 to ${pending.length}. See \`/attachments\`.` };
+      }
+      const removed = pending[index];
+      mutateChat(ctx.host, ctx.chat.id, (chat) => {
+        chat.pending.splice(index, 1);
+      });
+      return { kind: "notice", text: `Removed ${removed.name}.` };
+    }
+  };
+  var pdf = {
+    usage: "/pdf [auto | free | ocr | native]",
+    help: "Choose how PDFs are read",
+    run(ctx, args) {
+      const engine = args.toLowerCase();
+      if (engine === "") {
+        const current = ctx.chat?.settings.pdfEngine ?? ctx.config.pdfEngine;
+        return { kind: "notice", text: `PDF engine: **${current}**. Choose with \`/pdf ${PDF_ENGINES.join("|")}\`. \`auto\` sends the PDF to models that read files and uses the free parser otherwise; \`ocr\` uses Mistral OCR, which OpenRouter bills per page.` };
+      }
+      if (PDF_ENGINES.indexOf(engine) < 0)
+        return { kind: "notice", text: `Unknown PDF engine \`${args}\`. Use ${PDF_ENGINES.map((e) => `\`${e}\``).join(", ")}.` };
+      const chat = ctx.ensureChat();
+      mutateChat(ctx.host, chat.id, (current) => {
+        current.settings.pdfEngine = engine;
+      });
+      return { kind: "notice", text: `PDF engine for this chat: **${engine}**${engine === "ocr" ? " (billed per page by OpenRouter)" : ""}.` };
+    }
+  };
+  var feature2 = {
+    commands: { attach, paste, attachments, detach, pdf },
+    payloadOptions,
+    validateBody(_ctx, body) {
+      return body.length > MAX_BODY_BYTES ? `The message with its files is ${megabytes(body.length)} once encoded, over the ${megabytes(MAX_BODY_BYTES).replace(".0", "")} limit. Nothing was sent; detach a file with \`/detach\`.` : null;
+    },
+    footerFlags(ctx) {
+      const flags = [];
+      const notice = ctx.host.env.attach_notice;
+      if (notice)
+        flags.push(`⚠ ${notice}`);
+      if ((ctx.chat?.settings.pdfEngine ?? ctx.config.pdfEngine) === "ocr")
+        flags.push("pdf ocr");
+      const pending = ctx.chat?.pending ?? [];
+      if (pending.length > 0)
+        flags.push(`\uD83D\uDCCE ${pending.length} waiting (${formatSize(pending.reduce((sum, ref) => sum + ref.size, 0))})`);
+      return flags;
+    }
+  };
+
+  // src/core/titles.ts
+  var MAX_WORDS = 6;
+  function cleanTitle(reply) {
+    const firstLine = reply.split(`
+`).find((line) => line.trim() !== "") ?? "";
+    const stripped = firstLine.replace(/^#+\s*/, "").replace(/^(title:\s*)/i, "").replace(/^["'“”‘’`*_]+|["'“”‘’`*_]+$/g, "").trim();
+    const words = stripped.split(/\s+/).filter((word) => word !== "");
+    return words.slice(0, MAX_WORDS).join(" ").replace(/[.,;:!?…]+$/, "");
+  }
+  var TITLE_PROMPT = "Write a title of at most six words for the conversation below. Reply with only the title: no quotes, no trailing punctuation.";
+  function fileSafe(title) {
+    const cleaned = title.replace(/[\\/:*?"<>|\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80);
+    return cleaned === "" ? "Chat" : cleaned;
+  }
+
   // src/features/history.ts
   var DEFAULT_TITLE = "New chat";
   var MAX_TITLE_ATTEMPTS_MESSAGES = 4;
-  function clip2(text, length) {
+  function clip3(text, length) {
     return text.length > length ? `${text.slice(0, length)}…` : text;
   }
   function expandHome(host, path) {
@@ -2233,7 +2314,7 @@ ${decodeUtf8(bytes)}
       return chat.title;
     const first = chat.messages.find((message) => message.role === "user")?.content ?? chat.retry?.text ?? "";
     const flat = first.replace(/\s+/g, " ").trim();
-    return flat === "" ? DEFAULT_TITLE : clip2(flat, 60);
+    return flat === "" ? DEFAULT_TITLE : clip3(flat, 60);
   }
   function requestTitle(host, config, chatId) {
     const chat = getChat(host, chatId);
@@ -2246,9 +2327,9 @@ ${decodeUtf8(bytes)}
     const modelId = config.titleModel !== "" ? config.titleModel : config.defaultModel;
     const body = encodeBody(buildBody([
       { role: "system", content: TITLE_PROMPT },
-      { role: "user", content: `User: ${clip2(user.content, 600)}
+      { role: "user", content: `User: ${clip3(user.content, 600)}
 
-Assistant: ${clip2(assistant?.content ?? "", 600)}` }
+Assistant: ${clip3(assistant?.content ?? "", 600)}` }
     ], { modelId, model: null, stream: false, pdfEngine: "auto", web: false }));
     admit(host, {
       lane: `title:${chatId}`,
@@ -2736,7 +2817,7 @@ ${ctx.state.content}`;
   // src/features/web.ts
   var web = {
     usage: "/web [on | off | status]",
-    help: "Let the model search the web in this chat (extra cost per search)",
+    help: "Let the model search the web in this chat",
     run(ctx, args) {
       const value = args.toLowerCase();
       if (value === "" || value === "status") {
@@ -3100,7 +3181,7 @@ ${ctx.state.content}`;
     const chat = currentChat(host);
     const modelId = resolveModelId(host, config, chat);
     const body = chat && chat.messages.length > 0 ? viewTranscript(host, chat, 0) : WELCOME;
-    const retry = chat?.retry ? `_The last message failed (${chat.retry.error}). Type \`/retry\` to send it again._` : null;
+    const retry = chat?.retry ? `The last message failed (${chat.retry.error}). Type \`/retry\` to send it again.` : null;
     const pending = chat?.pending ?? [];
     const waiting = pending.length > 0 ? ["**\uD83D\uDCCE Ready to send with your next message**", ...pending.map((ref) => `- ${ref.name} (${formatSize(ref.size)})`), "", "Type your question and press ↩. `/detach` removes a file."].join(`
 `) : null;
@@ -3214,7 +3295,16 @@ ${body}`;
       turns.push({ role: "system", content: systemPrompt });
     for (const message of history)
       turns.push({ role: message.role, content: message.content, ...message.annotations ? { annotations: message.annotations } : {} });
-    turns.push({ role: "user", content: text });
+    const notes = [];
+    let userText = text;
+    if (chat.settings.web && draft.attachments.length === 0) {
+      const standalone = standaloneMessage(host, config.apiKey, config.titleModel !== "" ? config.titleModel : config.defaultModel, history, text);
+      if (standalone !== null) {
+        userText = standalone;
+        notes.push(`searched “${standalone.length > 60 ? `${standalone.slice(0, 60)}…` : standalone}”`);
+      }
+    }
+    turns.push({ role: "user", content: userText });
     let payloadOptions = {
       modelId,
       model,
@@ -3226,7 +3316,6 @@ ${body}`;
       excludeReasoning: false
     };
     let currentTurns = turns;
-    const notes = [];
     const context = () => ({ host, config, chat, modelId: payloadOptions.modelId, model: payloadOptions.model, turns: currentTurns, window: history, draft, options: payloadOptions });
     for (const feature of features) {
       const contribution = feature.payloadOptions ? feature.payloadOptions(context()) : undefined;

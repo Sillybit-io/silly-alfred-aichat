@@ -16,3 +16,5 @@
 - The workflow's lists no longer add "Use for Workflow Script Filter" entries to the Universal Actions panel.
 - ⌘⌥↩ goes back to the chat list from the chat, image, and preset views; `/open` and ⌘↩ in the image view open the newest image; the files action now shows for a single file too.
 - Presets set to copy or paste show their reply in a view instead (⌘↩ copies it) unless Preset Results is turned on.
+- A web follow-up such as "What about tomorrow?" is first rewritten into a standalone message by the title model, so the search has the subject and place. The chat keeps what you typed, and the footer shows what was searched. If the rewrite fails, your message is sent as typed.
+- Image, video, and similar models with a zero token price show "priced per image" or "priced per use" instead of "free", and a model that bills only input shows only its input price.

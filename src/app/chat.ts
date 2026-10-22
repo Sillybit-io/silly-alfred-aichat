@@ -1,6 +1,7 @@
 import { buildBody, chatUrl, encodeBody, type ContextTurn, type PayloadOptions } from "../core/payload";
 import type { MappedError } from "../core/errors";
 import { BUILTIN_COMMANDS, parseCommand, renderHelp, type HelpEntry } from "../core/commands";
+import { standaloneMessage } from "../store/web-query";
 import { contextLine, composeSystemPrompt } from "../core/system-prompt";
 import { domainOf } from "../core/favicons";
 import { ASSISTANT_HEADING, TURN_BREAK, YOU_HEADING, formatSize, renderTranscript, sourcesOf } from "../core/transcript";
@@ -100,7 +101,7 @@ function idleView(host: Host, config: Config, notice?: string, icon = "ℹ️"):
   const chat = currentChat(host);
   const modelId = resolveModelId(host, config, chat);
   const body = chat && chat.messages.length > 0 ? viewTranscript(host, chat, 0) : WELCOME;
-  const retry = chat?.retry ? `_The last message failed (${chat.retry.error}). Type \`/retry\` to send it again._` : null;
+  const retry = chat?.retry ? `The last message failed (${chat.retry.error}). Type \`/retry\` to send it again.` : null;
   const pending = chat?.pending ?? [];
   const waiting = pending.length > 0 ? ["**📎 Ready to send with your next message**", ...pending.map((ref) => `- ${ref.name} (${formatSize(ref.size)})`), "", "Type your question and press ↩. `/detach` removes a file."].join("\n") : null;
   const attachNotice = (host.env.attach_notice ?? "").trim() !== "" ? `⚠ ${host.env.attach_notice}` : null;
@@ -210,7 +211,16 @@ function send(host: Host, config: Config, finalizers: Finalizers, text: string, 
   });
   if (systemPrompt !== "") turns.push({ role: "system", content: systemPrompt });
   for (const message of history) turns.push({ role: message.role, content: message.content, ...(message.annotations ? { annotations: message.annotations } : {}) });
-  turns.push({ role: "user", content: text });
+  const notes: string[] = [];
+  let userText = text;
+  if (chat.settings.web && draft.attachments.length === 0) {
+    const standalone = standaloneMessage(host, config.apiKey, config.titleModel !== "" ? config.titleModel : config.defaultModel, history, text);
+    if (standalone !== null) {
+      userText = standalone;
+      notes.push(`searched “${standalone.length > 60 ? `${standalone.slice(0, 60)}…` : standalone}”`);
+    }
+  }
+  turns.push({ role: "user", content: userText });
 
   let payloadOptions: PayloadOptions = {
     modelId,
@@ -223,7 +233,6 @@ function send(host: Host, config: Config, finalizers: Finalizers, text: string, 
     excludeReasoning: false,
   };
   let currentTurns = turns;
-  const notes: string[] = [];
   const context = (): PayloadContext => ({ host, config, chat, modelId: payloadOptions.modelId, model: payloadOptions.model, turns: currentTurns, window: history, draft, options: payloadOptions });
   for (const feature of features) {
     const contribution: PayloadContribution | void = feature.payloadOptions ? feature.payloadOptions(context()) : undefined;

@@ -727,6 +727,7 @@ ${host.nowMs()}`);
     const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : 0;
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
   }
+  var IGNORED_PRICES = new Set(["prompt", "completion", "web_search", "internal_reasoning", "input_cache_read", "input_cache_write"]);
   function normalizeModel(raw) {
     if (!isObject(raw) || typeof raw.id !== "string" || raw.id === "")
       return null;
@@ -746,6 +747,7 @@ ${host.nowMs()}`);
       contextLength: typeof raw.context_length === "number" ? raw.context_length : 0,
       promptPrice: price(pricing.prompt),
       completionPrice: price(pricing.completion),
+      otherPriced: Object.entries(pricing).some(([key, value]) => !IGNORED_PRICES.has(key) && price(value) > 0),
       inputModalities: inputModalities.length > 0 ? inputModalities : ["text"],
       outputModalities: outputModalities.length > 0 ? outputModalities : ["text"],
       reasoning,
@@ -776,7 +778,12 @@ ${host.nowMs()}`);
     return Math.round(perToken * 1e6 * 1e6) / 1e6;
   }
   function isFree(model) {
-    return model.promptPrice === 0 && model.completionPrice === 0;
+    if (model.promptPrice !== 0 || model.completionPrice !== 0 || model.otherPriced === true)
+      return false;
+    return model.id.endsWith(":free") || model.outputModalities.every((modality) => modality === "text");
+  }
+  function pricedPerUse(model) {
+    return model.promptPrice === 0 && model.completionPrice === 0 && !isFree(model);
   }
 
   // src/core/errors.ts
@@ -1319,6 +1326,10 @@ ${host.nowMs()}`);
       parts.push(marks);
     if (isFree(model))
       parts.push("free");
+    else if (pricedPerUse(model))
+      parts.push(producesImage(model) ? "priced per image" : "priced per use");
+    else if (model.completionPrice === 0 && !model.outputModalities.includes("text"))
+      parts.push(`${formatPrice(perMillion(model.promptPrice))} in per 1M tokens`);
     else
       parts.push(`${formatPrice(perMillion(model.promptPrice))} in · ${formatPrice(perMillion(model.completionPrice))} out per 1M tokens`);
     if (model.contextLength > 0)
@@ -1560,7 +1571,7 @@ ${decodeUtf8(bytes)}
   };
   var pdf = {
     usage: "/pdf [auto | free | ocr | native]",
-    help: "Choose how PDFs are read; ocr is billed per page",
+    help: "Choose how PDFs are read",
     run(ctx, args) {
       const engine = args.toLowerCase();
       if (engine === "") {
@@ -2665,7 +2676,7 @@ ${ctx.state.content}`;
   // src/features/web.ts
   var web = {
     usage: "/web [on | off | status]",
-    help: "Let the model search the web in this chat (extra cost per search)",
+    help: "Let the model search the web in this chat",
     run(ctx, args) {
       const value = args.toLowerCase();
       if (value === "" || value === "status") {
