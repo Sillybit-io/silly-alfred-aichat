@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 0.1.0 — 2026-10-22
+
 - Streaming chat in an Alfred Text View with stop, reopen, retry, and copy actions.
 - Images, PDFs, and text files by Universal Action, file picker, or clipboard, with a snapshot kept per chat.
 - Model search with prices and badges, favorites, a default model, and a model per chat.
