@@ -1,0 +1,7 @@
+data: {"choices":
+data: [{"delta":{"content":"Héllo"}}]}
+
+data: {"id": "gen-1", "choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18, "cost": 0.00042}}
+
+data: [DONE]
+

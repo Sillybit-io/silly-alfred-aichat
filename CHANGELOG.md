@@ -1,0 +1,18 @@
+## Unreleased
+
+- Streaming chat in an Alfred Text View with stop, reopen, retry, and copy actions.
+- Images, PDFs, and text files by Universal Action, file picker, or clipboard, with a snapshot kept per chat.
+- Model search with prices and badges, favorites, a default model, and a model per chat.
+- Reasoning shown while it streams, `/think` effort, and per-chat web search.
+- Prompt presets with Text View, clipboard, paste, and Large Type outputs.
+- Chat history with automatic titles, pin, archive, Markdown export, and optional retention.
+- Image generation from `aiimage` and `/image`, with its file path in the view, `/reveal` to show it in Finder, and `krea/krea-2-medium-turbo` as the default model.
+- The `aichat` keyword opens a list: Continue, New chat, recent chats, and shortcuts to models, presets, and images. An optional alias keyword is available.
+- Web search sources shown as one line of short links, with `/sources` for the full list and an experimental setting for site icons.
+- A fuller default system prompt, with the current date, time, timezone, and macOS version added to each request.
+- A clear message when an OpenRouter data policy leaves no provider for a model, and `#imagegen` to find image models.
+- Universal Actions are named "AI Chat: …" so they are easy to find, the chat view lists files that are ready to send, and a file passed to the chat list can be attached from it.
+- Each default preset is its own Universal Action (**AI Chat: Translate** and so on), next to **AI Chat: Run a preset…** for all presets.
+- The workflow's lists no longer add "Use for Workflow Script Filter" entries to the Universal Actions panel.
+- ⌘⌥↩ goes back to the chat list from the chat, image, and preset views; `/open` and ⌘↩ in the image view open the newest image; the files action now shows for a single file too.
+- Presets set to copy or paste show their reply in a view instead (⌘↩ copies it) unless Preset Results is turned on.

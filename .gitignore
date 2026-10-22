@@ -1,0 +1,7 @@
+node_modules
+dist
+.dev
+reports
+Workflow/prefs.plist
+docs/plans
+docs/qa

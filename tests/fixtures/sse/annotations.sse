@@ -1,0 +1,8 @@
+data: {"id": "gen-1", "choices": [{"index": 0, "delta": {"content": "Per A", "annotations": [{"type": "url_citation", "url_citation": {"url": "https://example.com/a", "title": "A", "content": "x"}}]}, "finish_reason": null}]}
+
+data: {"id": "gen-1", "choices": [{"index": 0, "delta": {"content": " and A again", "annotations": [{"type": "url_citation", "url_citation": {"url": "https://example.com/a", "title": "A", "content": "x"}}]}, "finish_reason": null}]}
+
+data: {"id": "gen-1", "choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": "length"}]}
+
+data: [DONE]
+

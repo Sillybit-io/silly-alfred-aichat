@@ -1,0 +1,10 @@
+data: {"id": "gen-1", "choices": [{"index": 0, "delta": {"reasoning": "Let me "}, "finish_reason": null}]}
+
+data: {"id": "gen-1", "choices": [{"index": 0, "delta": {"reasoning": "think."}, "finish_reason": null}]}
+
+data: {"id": "gen-1", "choices": [{"index": 0, "delta": {"content": "42"}, "finish_reason": null}]}
+
+data: {"id": "gen-1", "choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": "stop"}]}
+
+data: [DONE]
+

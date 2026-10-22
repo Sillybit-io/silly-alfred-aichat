@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "id": "0aaaaaaaa000003",
+  "title": "Old budget notes",
+  "titleSource": "manual",
+  "createdAt": 1791551534579,
+  "updatedAt": 1791551534579,
+  "revision": 2,
+  "model": "anthropic/claude-sonnet-5.5",
+  "pinned": false,
+  "archived": true,
+  "settings": {
+    "web": false,
+    "showReasoning": false,
+    "effort": null,
+    "pdfEngine": null
+  },
+  "pending": [],
+  "retry": null,
+  "messages": [
+    {
+      "id": "0aaaaaaaa000003-u",
+      "requestId": "0aaaaaaaa000003",
+      "role": "user",
+      "content": "First question for Old budget notes",
+      "attachments": [],
+      "status": "ok",
+      "createdAt": 1791551534579
+    },
+    {
+      "id": "0aaaaaaaa000003-a",
+      "requestId": "0aaaaaaaa000003",
+      "role": "assistant",
+      "content": "An answer.",
+      "attachments": [],
+      "status": "ok",
+      "createdAt": 1791551534579
+    }
+  ]
+}

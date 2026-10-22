@@ -1,0 +1,25 @@
+{
+  "name": "silly-alfred-aichat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun scripts/build.ts",
+    "build:probe": "bun scripts/build.ts --entries src/qa --out dist/qa",
+    "check": "tsc -p tsconfig.json && tsc -p tsconfig.jxa.json",
+    "test": "bun test",
+    "dev": "bun scripts/dev.ts",
+    "plist": "bun scripts/workflow.ts",
+    "package": "bun scripts/package.ts",
+    "bump": "bun scripts/bump-version.ts",
+    "release:check": "bun scripts/release-check.ts",
+    "qa:candidate": "bun scripts/qa.ts candidate",
+    "qa:verify": "bun scripts/qa.ts verify"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.3",
+    "plist": "5.0.0",
+    "typescript": "5.9.3",
+    "yaml": "2.9.1"
+  }
+}

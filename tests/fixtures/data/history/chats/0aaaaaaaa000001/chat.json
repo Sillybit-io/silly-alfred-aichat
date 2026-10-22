@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "id": "0aaaaaaaa000001",
+  "title": "Trip planning",
+  "titleSource": "auto",
+  "createdAt": 1792451534579,
+  "updatedAt": 1792451534579,
+  "revision": 2,
+  "model": "anthropic/claude-sonnet-5.5",
+  "pinned": true,
+  "archived": false,
+  "settings": {
+    "web": false,
+    "showReasoning": false,
+    "effort": null,
+    "pdfEngine": null
+  },
+  "pending": [],
+  "retry": null,
+  "messages": [
+    {
+      "id": "0aaaaaaaa000001-u",
+      "requestId": "0aaaaaaaa000001",
+      "role": "user",
+      "content": "First question for Trip planning",
+      "attachments": [],
+      "status": "ok",
+      "createdAt": 1792451534579
+    },
+    {
+      "id": "0aaaaaaaa000001-a",
+      "requestId": "0aaaaaaaa000001",
+      "role": "assistant",
+      "content": "An answer.",
+      "attachments": [],
+      "status": "ok",
+      "createdAt": 1792451534579
+    }
+  ]
+}

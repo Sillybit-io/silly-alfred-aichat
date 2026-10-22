@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "id": "0aaaaaaaa000002",
+  "title": "New chat",
+  "titleSource": "auto",
+  "createdAt": 1792624334579,
+  "updatedAt": 1792624334579,
+  "revision": 2,
+  "model": "anthropic/claude-sonnet-5.5",
+  "pinned": false,
+  "archived": false,
+  "settings": {
+    "web": false,
+    "showReasoning": false,
+    "effort": null,
+    "pdfEngine": null
+  },
+  "pending": [],
+  "retry": null,
+  "messages": [
+    {
+      "id": "0aaaaaaaa000002-u",
+      "requestId": "0aaaaaaaa000002",
+      "role": "user",
+      "content": "First question for New chat",
+      "attachments": [],
+      "status": "ok",
+      "createdAt": 1792624334579
+    },
+    {
+      "id": "0aaaaaaaa000002-a",
+      "requestId": "0aaaaaaaa000002",
+      "role": "assistant",
+      "content": "An answer.",
+      "attachments": [],
+      "status": "ok",
+      "createdAt": 1792624334579
+    }
+  ]
+}
