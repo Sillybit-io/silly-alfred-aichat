@@ -43,7 +43,7 @@ const image: Command = {
     if (!parsed.ok) return { kind: "notice", text: parsed.message };
     const modelId = parsed.request.model ?? ctx.config.imageModel;
     if (modelId === "") return { kind: "notice", text: "Choose an image model first: set Image Model in the workflow's Configuration, or add `--model <id>`." };
-    if (ctx.config.apiKey === "") return { kind: "notice", text: "Add your OpenRouter API key in the workflow's Configuration first." };
+    if (ctx.config.apiKey === "") return { kind: "notice", text: ctx.config.keyIssue ?? "Add your OpenRouter API key in the workflow's Configuration first." };
     const chat = ctx.ensureChat();
     const result = admit(
       ctx.host,

@@ -3,9 +3,8 @@ import type { MappedError } from "../core/errors";
 import { BUILTIN_COMMANDS, parseCommand, renderHelp, type HelpEntry } from "../core/commands";
 import { standaloneMessage } from "../store/web-query";
 import { contextLine, composeSystemPrompt } from "../core/system-prompt";
-import { domainOf } from "../core/favicons";
 import { flattenTables } from "../core/tables";
-import { ASSISTANT_HEADING, TURN_BREAK, YOU_HEADING, formatSize, renderTranscript, sourcesOf } from "../core/transcript";
+import { ASSISTANT_HEADING, TURN_BREAK, YOU_HEADING, formatSize, renderTranscript } from "../core/transcript";
 import {
   allCommands,
   collectFinalizers,
@@ -20,13 +19,13 @@ import {
 } from "../features/index";
 import type { Host } from "../host/types";
 import { ensureCatalog } from "../store/catalog";
-import { loadFavicons, resolveFavicons } from "../store/favicons";
 import { clearCurrent, getChat, getCurrent, type AttachmentRef, type Chat } from "../store/chats";
 import { currentChat, ensureCurrentChat } from "../store/current-chat";
 import { admit, advance, currentRecord, finalizeDue, loadRecord, stop, type Finalizers, type Outcome, type RequestRecord } from "../store/requests";
 import { getSettings } from "../store/settings";
 import { readContextInfo } from "../store/system-context";
-import { imageError, viewJson, type ViewFrame } from "./view";
+import { imagesFolder } from "../store/images";
+import { imageError, viewJson as renderView, type ViewFrame } from "./view";
 
 const RERUN_SECONDS = 0.1;
 const PLACEHOLDER = "…";
@@ -37,34 +36,14 @@ const PHASE_LABEL = { connecting: "connecting", processing: "processing", thinki
 
 const chatLane = (chatId: string) => `chat:${chatId}`;
 const SOURCE_CAP = 8;
-const ICON_WAIT_MS = 1500;
 
-function domainsOfMessage(message: Chat["messages"][number]): string[] {
-  const found: string[] = [];
-  for (const source of sourcesOf(message)) {
-    const domain = domainOf(source.url);
-    if (domain !== null && found.indexOf(domain) < 0) found.push(domain);
-  }
-  return found;
+// The workflow's own pictures live in the images folder; no other image is ever shown.
+function viewJson(host: Host, config: Config, frame: ViewFrame): string {
+  return renderView({ ...frame, imageRoots: [imagesFolder(host, config)] });
 }
 
-// The transcript with sources as favicons. Icons for the newest reply are fetched (and briefly waited for);
-// older ones are used only when already cached.
-function viewTranscript(host: Host, chat: Chat, waitMs: number): string {
-  return flattenTables(transcriptWithSources(host, chat, waitMs));
-}
-
-function transcriptWithSources(host: Host, chat: Chat, waitMs: number): string {
-  const withSources = chat.messages.filter((message) => sourcesOf(message).length > 0);
-  if (withSources.length === 0) return renderTranscript(chat);
-  // Icons are an opt-in: with plain links nothing is ever downloaded.
-  if (!readConfig(host).sourcesIcons) return renderTranscript(chat, { cap: SOURCE_CAP, icons: false, icon: () => null });
-  const every = new Set<string>();
-  for (const message of withSources) for (const domain of domainsOfMessage(message)) every.add(domain);
-  const icons = resolveFavicons(host, [...every], { start: false });
-  const newest = domainsOfMessage(withSources[withSources.length - 1]!).slice(0, SOURCE_CAP);
-  for (const [domain, path] of loadFavicons(host, newest, waitMs)) icons.set(domain, path);
-  return renderTranscript(chat, { cap: SOURCE_CAP, icons: true, icon: (domain) => icons.get(domain) ?? null });
+function viewTranscript(chat: Chat): string {
+  return flattenTables(renderTranscript(chat, { sourcesRowCap: SOURCE_CAP }));
 }
 
 function resolveModelId(host: Host, config: Config, chat: Chat | null): string {
@@ -105,7 +84,7 @@ function ensureModel(host: Host, modelId: string) {
 function idleView(host: Host, config: Config, notice?: string, icon = "ℹ️"): string {
   const chat = currentChat(host);
   const modelId = resolveModelId(host, config, chat);
-  const body = chat && chat.messages.length > 0 ? viewTranscript(host, chat, 0) : WELCOME;
+  const body = chat && chat.messages.length > 0 ? viewTranscript(chat) : WELCOME;
   const retry = chat?.retry ? `The last message failed (${chat.retry.error}). Type \`/retry\` to send it again.` : null;
   const pending = chat?.pending ?? [];
   const waiting = pending.length > 0 ? ["**📎 Ready to send with your next message**", ...pending.map((ref) => `- ${ref.name} (${formatSize(ref.size)})`), "", "Type your question and press ↩. `/detach` removes a file."].join("\n") : null;
@@ -118,7 +97,7 @@ function idleView(host: Host, config: Config, notice?: string, icon = "ℹ️"):
     requestId: "",
     stage: "",
   };
-  return viewJson(frame);
+  return viewJson(host, config, frame);
 }
 
 function stateLabel(outcome: Outcome | null, record: RequestRecord): string {
@@ -131,7 +110,7 @@ function finalView(host: Host, config: Config, record: RequestRecord, outcome: O
   const chat = record.chatId ? getChat(host, record.chatId) : null;
   const modelId = record.model;
   const parts: (string | null)[] = [];
-  if (chat && chat.messages.length > 0) parts.push(viewTranscript(host, chat, ICON_WAIT_MS));
+  if (chat && chat.messages.length > 0) parts.push(viewTranscript(chat));
   const committed = chat !== null && chat.messages.some((message) => message.requestId === record.id);
   if (!committed) {
     if (record.kind !== "title") {
@@ -142,7 +121,7 @@ function finalView(host: Host, config: Config, record: RequestRecord, outcome: O
     else if (record.state === "stopped") parts.push("_■ Stopped before the first token. Type `/retry` to send it again._");
   }
   if (chat?.retry) parts.push(`_Type \`/retry\` to send the last message again._`);
-  return viewJson({
+  return viewJson(host, config, {
     response: join(...parts),
     footer: footer([modelId, stateLabel(outcome, record), ...footerFlagsFor(host, config, chat, modelId, record)]),
     mode: "replace",
@@ -152,12 +131,6 @@ function finalView(host: Host, config: Config, record: RequestRecord, outcome: O
 }
 
 function assistantSection(host: Host, config: Config, record: RequestRecord, chat: Chat | null): string {
-  const cited = record.reducer.annotations.flatMap((annotation) => {
-    const inner = typeof annotation.url_citation === "object" && annotation.url_citation !== null ? (annotation.url_citation as { url?: unknown }) : (annotation as { url?: unknown });
-    const domain = typeof inner.url === "string" ? domainOf(inner.url) : null;
-    return domain === null ? [] : [domain];
-  });
-  if (cited.length > 0 && config.sourcesIcons) resolveFavicons(host, [...new Set(cited)].slice(0, SOURCE_CAP), { start: true });
   if (record.kind === "image") return `${ASSISTANT_HEADING}\n\n_Generating image…_`;
   const live = renderLiveSection({ host, config, chat, record, state: record.reducer });
   const body = live ?? (record.reducer.content !== "" ? record.reducer.content : PLACEHOLDER);
@@ -174,13 +147,13 @@ function liveView(host: Host, config: Config, record: RequestRecord, stage: stri
   const bar = footer([record.model, `${phase} ${elapsed}s`, ...footerFlagsFor(host, config, chat, record.model, record), hint]);
   const base = { footer: bar, requestId: record.id, rerun: RERUN_SECONDS };
   if (stage === "live") {
-    return viewJson({ ...base, response: assistantSection(host, config, record, chat), mode: "replacelast", stage: "live" });
+    return viewJson(host, config, { ...base, response: assistantSection(host, config, record, chat), mode: "replacelast", stage: "live" });
   }
   if (stage === "header") {
-    return viewJson({ ...base, response: assistantSection(host, config, record, chat), mode: "append", stage: "live" });
+    return viewJson(host, config, { ...base, response: assistantSection(host, config, record, chat), mode: "append", stage: "live" });
   }
-  const history = chat && chat.messages.length > 0 ? viewTranscript(host, chat, 0) : null;
-  return viewJson({ ...base, response: join(history, history ? TURN_BREAK : null, draftBlock(record.draft.text, record.draft.attachments)), mode: "replace", stage: "header" });
+  const history = chat && chat.messages.length > 0 ? viewTranscript(chat) : null;
+  return viewJson(host, config, { ...base, response: join(history, history ? TURN_BREAK : null, draftBlock(record.draft.text, record.draft.attachments)), mode: "replace", stage: "header" });
 }
 
 function handleRerun(host: Host, config: Config, finalizers: Finalizers, rid: string, typed: string): string {
@@ -201,7 +174,7 @@ type SendOptions = { attachments?: AttachmentRef[]; retryOf?: string };
 
 function send(host: Host, config: Config, finalizers: Finalizers, text: string, options: SendOptions = {}): string {
   if (config.apiKey === "") {
-    return idleView(host, config, "**Add your OpenRouter API key.** Open this workflow's Configuration in Alfred Preferences and paste a key from openrouter.ai/keys. Your message is still in the input.", "⚠️");
+    return idleView(host, config, config.keyIssue ?? "**Add your OpenRouter API key.** Open this workflow's Configuration in Alfred Preferences and paste a key from openrouter.ai/keys. Your message is still in the input.", "⚠️");
   }
   const chat = ensureCurrentChat(host, config);
   const modelId = resolveModelId(host, config, chat);
@@ -218,8 +191,8 @@ function send(host: Host, config: Config, finalizers: Finalizers, text: string, 
   for (const message of history) turns.push({ role: message.role, content: message.content, ...(message.annotations ? { annotations: message.annotations } : {}) });
   const notes: string[] = [];
   let userText = text;
-  if (chat.settings.web && draft.attachments.length === 0) {
-    const standalone = standaloneMessage(host, config.apiKey, config.titleModel !== "" ? config.titleModel : config.defaultModel, history, text);
+  if (chat.settings.web && config.webRewrite && draft.attachments.length === 0) {
+    const standalone = standaloneMessage(host, config.apiKey, config.privacy, config.titleModel !== "" ? config.titleModel : config.defaultModel, history, text);
     if (standalone.text !== null) {
       userText = standalone.text;
       notes.push(`searched “${standalone.text.length > 60 ? `${standalone.text.slice(0, 60)}…` : standalone.text}”`);
@@ -238,6 +211,7 @@ function send(host: Host, config: Config, finalizers: Finalizers, text: string, 
     webMaxResults: config.webMaxResults,
     effort: chat.settings.effort,
     excludeReasoning: false,
+    privacy: config.privacy,
   };
   let currentTurns = turns;
   const context = (): PayloadContext => ({ host, config, chat, modelId: payloadOptions.modelId, model: payloadOptions.model, turns: currentTurns, window: history, draft, options: payloadOptions });

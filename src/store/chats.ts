@@ -147,7 +147,7 @@ export function getChat(host: Host, id: string): Chat | null {
 }
 
 // Read-modify-write under the chat's lock. The write goes through a temp file inside the existing
-// folder, so a chat trashed meanwhile raises NotFoundError and is never recreated.
+// folder, so a chat deleted meanwhile raises NotFoundError and is never recreated.
 // The callback returns false to leave the chat untouched.
 export function mutateChat(host: Host, id: string, fn: (chat: Chat) => void | false): Chat {
   if (!host.exists(chatDir(host, id))) throw new NotFoundError(id);
@@ -228,7 +228,7 @@ export function listSummaries(host: Host): ChatSummary[] {
 }
 
 // Retention: chats idle longer than retentionDays, then the oldest beyond maxChats; 0 turns a rule off.
-// Pinned and active chats are re-checked under each chat's lock, and a pruned chat goes to the Trash.
+// Pinned and active chats are re-checked under each chat's lock, and a pruned chat is deleted for good.
 export function pruneChats(host: Host, retentionDays: number, maxChats: number, activeChatIds: string[] | Set<string>): string[] {
   const active = new Set(activeChatIds);
   const now = host.nowMs();
@@ -241,18 +241,23 @@ export function pruneChats(host: Host, retentionDays: number, maxChats: number, 
     const kept = listSummaries(host).filter((summary) => !doomed.has(summary.id));
     for (const summary of kept.slice(maxChats)) if (!summary.pinned && !active.has(summary.id)) doomed.add(summary.id);
   }
-  const trashed: string[] = [];
+  const pruned: string[] = [];
   for (const id of doomed) {
     try {
       withLock(host, chatLock(host, id), () => {
         const chat = getChat(host, id);
         if (!chat || chat.pinned || active.has(id)) return;
-        host.trash(chatDir(host, id));
-        trashed.push(id);
+        try {
+          host.remove(chatDir(host, id));
+        } catch (error) {
+          host.log(`could not prune chat ${id}: ${String(error)}`);
+          return;
+        }
+        pruned.push(id);
       });
     } catch (error) {
       if (host.exists(chatDir(host, id))) throw error;
     }
   }
-  return trashed;
+  return pruned;
 }

@@ -44,7 +44,7 @@
           <key>modifiers</key>
           <integer>262144</integer>
           <key>modifiersubtext</key>
-          <string>Move to the Trash</string>
+          <string>Delete permanently</string>
           <key>vitoclose</key>
           <false/>
         </dict>
@@ -443,7 +443,7 @@
           <key>modifiers</key>
           <integer>262144</integer>
           <key>modifiersubtext</key>
-          <string>Move to the Trash</string>
+          <string>Delete permanently</string>
           <key>vitoclose</key>
           <false/>
         </dict>
@@ -535,7 +535,7 @@
           <key>modifiers</key>
           <integer>262144</integer>
           <key>modifiersubtext</key>
-          <string>Move to the Trash</string>
+          <string>Delete permanently</string>
           <key>vitoclose</key>
           <false/>
         </dict>
@@ -2488,7 +2488,7 @@
           <key>skipuniversalaction</key>
           <true/>
           <key>subtext</key>
-          <string>↩ Open · ⌘↩ Archive · ⌥↩ Pin · ⌃↩ Trash</string>
+          <string>↩ Open · ⌘↩ Archive · ⌥↩ Pin · ⌃↩ Delete</string>
           <key>title</key>
           <string>AI Chat History</string>
           <key>type</key>
@@ -2743,7 +2743,7 @@ Chat with any OpenRouter model from Alfred, without installing anything.
 - `aimodels` searches the model list. ↩ uses a model in this chat, ⌘↩ makes it the default, ⌥↩ adds a favorite, ⌃↩ copies its id.
 - Select text and use **AI Chat: Ask about this text** or **AI Chat: Summarize**, **AI Chat: Translate** and the other preset actions, or **AI Chat: Run a preset…**, or type `aipresets`, to run a prompt preset. Edit `presets.json` from the first list to add your own.
 - `aiimage` generates images; `/image` does the same inside a chat.
-- On a chat in the list: ↩ opens it, ⌘↩ archives, ⌥↩ pins, ⌃↩ moves it to the Trash. **All chats…** opens the full list.
+- On a chat in the list: ↩ opens it, ⌘↩ archives, ⌥↩ pins, ⌃↩ deletes it permanently after a confirmation. **All chats…** opens the full list.
 
 ## Set it up
 
@@ -3366,6 +3366,36 @@ This workflow borrows the streaming Text View pattern from the OpenAI workflow b
         <key>config</key>
         <dict>
           <key>default</key>
+          <string>deny</string>
+          <key>pairs</key>
+          <array>
+            <array>
+              <string>No data collection (recommended)</string>
+              <string>deny</string>
+            </array>
+            <array>
+              <string>Zero data retention only</string>
+              <string>zdr</string>
+            </array>
+            <array>
+              <string>Standard (any provider your account allows)</string>
+              <string>standard</string>
+            </array>
+          </array>
+        </dict>
+        <key>description</key>
+        <string>Which providers may see your messages. Some models have no provider under the stricter choices. Image generation follows your OpenRouter privacy settings.</string>
+        <key>label</key>
+        <string>Provider Privacy</string>
+        <key>type</key>
+        <string>popupbutton</string>
+        <key>variable</key>
+        <string>privacy_mode</string>
+      </dict>
+      <dict>
+        <key>config</key>
+        <dict>
+          <key>default</key>
           <string>You are a capable, honest assistant that the user reaches from Alfred on their Mac. Put the answer first and keep it concise; skip preambles, apologies, and closing offers. Format with Markdown, and put code in fenced blocks that name the language. Do not use tables, because the view cannot show them; use short lists instead. Reply in the language the user writes in and match their tone. If a request is ambiguous, ask one short clarifying question instead of guessing. If you are unsure or do not know, say so rather than inventing facts, names, or links. When files or images are attached, refer to them by name.</string>
           <key>placeholder</key>
           <string/>
@@ -3522,6 +3552,25 @@ This workflow borrows the streaming Text View pattern from the OpenAI workflow b
         <key>config</key>
         <dict>
           <key>default</key>
+          <true/>
+          <key>required</key>
+          <false/>
+          <key>text</key>
+          <string>Rewrite a follow-up into a standalone search with one small extra request (it carries the chat so far)</string>
+        </dict>
+        <key>description</key>
+        <string/>
+        <key>label</key>
+        <string>Web Follow-ups</string>
+        <key>type</key>
+        <string>checkbox</string>
+        <key>variable</key>
+        <string>web_rewrite</string>
+      </dict>
+      <dict>
+        <key>config</key>
+        <dict>
+          <key>default</key>
           <string>model</string>
           <key>pairs</key>
           <array>
@@ -3574,32 +3623,6 @@ This workflow borrows the streaming Text View pattern from the OpenAI workflow b
         <string>checkbox</string>
         <key>variable</key>
         <string>keep_reasoning</string>
-      </dict>
-      <dict>
-        <key>config</key>
-        <dict>
-          <key>default</key>
-          <string>links</string>
-          <key>pairs</key>
-          <array>
-            <array>
-              <string>Short links (recommended)</string>
-              <string>links</string>
-            </array>
-            <array>
-              <string>Site icons and links (experimental)</string>
-              <string>icons</string>
-            </array>
-          </array>
-        </dict>
-        <key>description</key>
-        <string/>
-        <key>label</key>
-        <string>Sources</string>
-        <key>type</key>
-        <string>popupbutton</string>
-        <key>variable</key>
-        <string>sources_style</string>
       </dict>
       <dict>
         <key>config</key>
@@ -3748,6 +3771,25 @@ This workflow borrows the streaming Text View pattern from the OpenAI workflow b
         <key>config</key>
         <dict>
           <key>default</key>
+          <false/>
+          <key>required</key>
+          <false/>
+          <key>text</key>
+          <string>Save the prompt inside each image file (it travels with the file when you share it, and Spotlight indexes it)</string>
+        </dict>
+        <key>description</key>
+        <string/>
+        <key>label</key>
+        <string>Image Prompts</string>
+        <key>type</key>
+        <string>checkbox</string>
+        <key>variable</key>
+        <string>image_save_prompt</string>
+      </dict>
+      <dict>
+        <key>config</key>
+        <dict>
+          <key>default</key>
           <string>300</string>
           <key>placeholder</key>
           <string/>
@@ -3799,7 +3841,7 @@ This workflow borrows the streaming Text View pattern from the OpenAI workflow b
           <true/>
         </dict>
         <key>description</key>
-        <string>0 keeps every chat. Pinned chats are never deleted; others go to the Trash.</string>
+        <string>0 keeps every chat. Pinned chats are never deleted; the others are deleted for good.</string>
         <key>label</key>
         <string>Delete Chats After (days)</string>
         <key>type</key>

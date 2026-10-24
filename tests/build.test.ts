@@ -29,4 +29,26 @@ describe("build", () => {
     const text = readFileSync(target!, "utf8");
     expect(text).not.toMatch(/^\s*(import|export)\s/m);
   });
+
+  async function hooksOf(release: boolean) {
+    const out = mkdtempSync(join(tmpdir(), "aichat-build-"));
+    const [target] = await buildEntries(root, { entries: "tests/fixtures/hooks", out, release });
+    const context = createContext({});
+    runInContext(readFileSync(target!, "utf8").split("\n").slice(1).join("\n"), context);
+    return JSON.parse(runInContext("run([])", context));
+  }
+
+  test("a release bundle ignores the test hooks: https, OpenRouter, and /usr/bin/curl only", async () => {
+    expect(await hooksOf(true)).toEqual({ base: "https://openrouter.ai/api/v1", curl: "/usr/bin/curl", proto: ["--proto", "=https", "--proto-redir", "=https"] });
+  });
+
+  test("a dev bundle keeps them, and still follows redirects to https only", async () => {
+    expect(await hooksOf(false)).toEqual({ base: "http://127.0.0.1:9/v1", curl: "/tmp/fake-curl", proto: ["--proto", "=http,https", "--proto-redir", "=https"] });
+  });
+
+  test("the committed Workflow bundles are release builds", () => {
+    for (const name of ["chat.js", "models.js", "preset-run.js", "image.js"]) {
+      expect(readFileSync(join(root, "Workflow", name), "utf8"), name).toContain("var TEST_HOOKS = false;");
+    }
+  });
 });

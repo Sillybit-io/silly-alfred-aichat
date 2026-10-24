@@ -74,7 +74,7 @@ export async function runDev(argv: string[]): Promise<string[]> {
   try {
     let session: Record<string, string> = {};
     for (let round = 0; round < 10000; round++) {
-      const host = new BunHost({ env: { ...baseEnv, ...session }, trashDir: join(dev, "trash") });
+      const host = new BunHost({ env: { ...baseEnv, ...session } });
       const output: string = module.main(host, options.args);
       frames.push(output);
       const rerun = (() => {

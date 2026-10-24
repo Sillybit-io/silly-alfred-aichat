@@ -18,7 +18,7 @@ function fresh(extra: Record<string, string> = {}) {
   mkdirSync(join(dir, "data"), { recursive: true });
   mkdirSync(join(dir, "cache"), { recursive: true });
   const env = { PATH: process.env.PATH, ...parseEnvFile(join(repo, "tests/fixtures/dev.env")), alfred_workflow_data: join(dir, "data"), alfred_workflow_cache: join(dir, "cache"), ...extra };
-  return { dir, host: (more: Record<string, string> = {}) => new BunHost({ env: { ...env, ...more }, trashDir: join(dir, "Trash") }) };
+  return { dir, host: (more: Record<string, string> = {}) => new BunHost({ env: { ...env, ...more } }) };
 }
 type Ctx = ReturnType<typeof fresh>;
 const items = (ctx: Ctx, query = "") => JSON.parse(root(ctx.host(), [query])).items as any[];
@@ -57,7 +57,7 @@ describe("chat list (root)", () => {
     expect(beta).toMatchObject({ type: "file", arg: chatDir(ctx.host(), b), variables: { root_action: "open" } });
     expect(beta.mods.cmd).toMatchObject({ variables: { root_action: "archive" } });
     expect(beta.mods.alt).toMatchObject({ subtitle: "Unpin this chat", variables: { root_action: "pin" } });
-    expect(beta.mods.ctrl).toMatchObject({ variables: { root_action: "trash" } });
+    expect(beta.mods.ctrl).toMatchObject({ variables: { root_action: "delete" } });
   });
 
   test("typed text is what Continue and New chat send, and it filters the chats and shortcuts", () => {
@@ -95,7 +95,7 @@ describe("chat list actions", () => {
     expect(getChat(ctx.host(), a)).not.toBeNull();
   });
 
-  test("open sets current and sends no arg; archive, pin, and trash return to the list with no arg", () => {
+  test("open sets current and sends no arg; archive, pin, and delete return to the list with no arg", () => {
     const ctx = fresh();
     const a = seed(ctx, "Alpha");
     const b = seed(ctx, "Beta");
@@ -104,10 +104,9 @@ describe("chat list actions", () => {
     expect(getCurrent(ctx.host())).toBe(a);
     for (const action of ["archive", "pin"]) expect(envelope(rootAction(ctx.host({ root_action: action }), [chatDir(ctx.host(), b)]))).toMatchObject({ arg: "", variables: { root_next: "root" } });
     expect(getChat(ctx.host(), b)).toMatchObject({ archived: true, pinned: true });
-    const trashed = envelope(rootAction(ctx.host({ root_action: "trash" }), [chatDir(ctx.host(), b)]));
-    expect(trashed.variables.root_next).toBe("root");
+    const deleted = envelope(rootAction(ctx.host({ root_action: "delete" }), [chatDir(ctx.host(), b)]));
+    expect(deleted.variables.root_next).toBe("root");
     expect(existsSync(chatDir(ctx.host(), b))).toBe(false);
-    expect(readdirSync(join(ctx.dir, "Trash"))).toEqual([b]);
     const gone = envelope(rootAction(ctx.host({ root_action: "open" }), [chatDir(ctx.host(), b)]));
     expect(gone.variables.notice).toContain("no longer exists");
     expect(gone.variables.root_next).toBe("root");

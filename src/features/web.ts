@@ -1,4 +1,4 @@
-import { lastReply, sourcesOf } from "../core/transcript";
+import { lastReply, sourceLine, sourcesOf } from "../core/transcript";
 import { mutateChat } from "../store/chats";
 import type { Command, Feature } from "./index";
 
@@ -27,7 +27,7 @@ const sources: Command = {
     const reply = ctx.chat ? lastReply(ctx.chat) : null;
     const list = reply ? sourcesOf(reply) : [];
     if (list.length === 0) return { kind: "notice", text: "The last reply cited no sources." };
-    return { kind: "notice", text: ["**Sources**", ...list.map((source, i) => `${i + 1}. [${source.title}](${source.url})`)].join("\n") };
+    return { kind: "notice", text: ["**Sources**", ...list.map((source, i) => `${i + 1}. ${sourceLine(source)}`)].join("\n") };
   },
 };
 

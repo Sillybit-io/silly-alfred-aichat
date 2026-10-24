@@ -48,7 +48,7 @@ function fresh(extra: Record<string, string> = {}) {
   writeFileSync(join(dir, "cache/models.json"), JSON.stringify({ fetchedAt: Date.now(), models: [] }));
   const env = { PATH: process.env.PATH, HOME: join(dir, "home"), ...parseEnvFile(join(root, "tests/fixtures/dev.env")), alfred_workflow_data: join(dir, "data"), alfred_workflow_cache: join(dir, "cache"), aichat_api_base: `http://127.0.0.1:${server.port}/v1`, export_folder: "~/Exports", auto_titles: "1", ...extra };
   const session: Record<string, string> = {};
-  return { dir, session, host: (more: Record<string, string> = {}) => new BunHost({ env: { ...env, ...session, ...more }, trashDir: join(dir, "Trash") }) };
+  return { dir, session, host: (more: Record<string, string> = {}) => new BunHost({ env: { ...env, ...session, ...more } }) };
 }
 type Ctx = ReturnType<typeof fresh>;
 const parse = (text: string) => JSON.parse(text);
@@ -85,7 +85,7 @@ describe("history list", () => {
     expect(list[0].subtitle).toContain("pinned");
     expect(list[1].mods.cmd).toMatchObject({ subtitle: "Archive this chat", variables: { history_action: "archive" }, arg: chatDir(ctx.host(), plain) });
     expect(list[0].mods.alt).toMatchObject({ subtitle: "Unpin this chat", variables: { history_action: "pin" } });
-    expect(list[1].mods.ctrl).toMatchObject({ variables: { history_action: "trash" } });
+    expect(list[1].mods.ctrl).toMatchObject({ variables: { history_action: "delete" } });
     expect(items(ctx, "archived").map((i) => i.title)).toEqual(["Shelved"]);
     expect(items(ctx, "plai").map((i) => i.title)).toEqual(["Plain"]);
     expect(items(ctx, "zzz")[0]).toMatchObject({ title: "No chats match", valid: false });
@@ -115,32 +115,59 @@ describe("history actions", () => {
     expect(getChat(ctx.host(), b)!.pinned).toBe(true);
   });
 
-  test("trash moves the folder to the Trash, clears current when it was current, and a vanished chat is handled", () => {
+  test("delete removes the folder for good, clears current when it was current, and a vanished chat is handled", () => {
     const ctx = fresh();
     const a = seed(ctx, "A");
     setCurrent(ctx.host(), a);
-    const out = parse(historyAction(ctx.host({ history_action: "trash" }), [`${chatDir(ctx.host(), a)}/`])).alfredworkflow;
+    const out = parse(historyAction(ctx.host({ history_action: "delete" }), [`${chatDir(ctx.host(), a)}/`])).alfredworkflow;
     expect(out.variables.history_next).toBe("list");
     expect(existsSync(chatDir(ctx.host(), a))).toBe(false);
-    expect(readdirSync(join(ctx.dir, "Trash"))).toEqual([a]);
     expect(getCurrent(ctx.host())).toBeNull();
     const gone = parse(historyAction(ctx.host({ history_action: "open" }), [chatDir(ctx.host(), a)])).alfredworkflow;
     expect(gone.variables.notice).toContain("no longer exists");
     expect(existsSync(chatDir(ctx.host(), a))).toBe(false);
   });
 
-  test("a chat that is not current stays current when another is trashed", () => {
+  test("nothing is deleted unless the confirmation is accepted", () => {
+    const ctx = fresh();
+    const a = seed(ctx, "A");
+    const asked: string[] = [];
+    const declining = new BunHost({ env: { ...ctx.host().env, history_action: "delete" }, confirm: (message, action) => (asked.push(`${action}: ${message}`), false) });
+    const out = parse(historyAction(declining, [chatDir(declining, a)])).alfredworkflow;
+    expect(out.variables.notice).toBe("The chat was not deleted");
+    expect(existsSync(chatDir(declining, a))).toBe(true);
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain("Delete: Delete “A” permanently?");
+  });
+
+  test("a delete that fails keeps the chat and the current pointer and says so", () => {
+    const ctx = fresh();
+    const a = seed(ctx, "A");
+    setCurrent(ctx.host(), a);
+    const failing = new (class extends BunHost {
+      override remove(path: string): void {
+        if (path.endsWith(`/chats/${a}`)) throw new Error("remove failed for " + path);
+        super.remove(path);
+      }
+    })({ env: { ...ctx.host().env, history_action: "delete" }, onLog: () => {} });
+    const out = parse(historyAction(failing, [chatDir(failing, a)])).alfredworkflow;
+    expect(out.variables.notice).toBe("The chat could not be deleted");
+    expect(existsSync(chatDir(failing, a))).toBe(true);
+    expect(getCurrent(failing)).toBe(a);
+  });
+
+  test("a chat that is not current stays current when another is deleted", () => {
     const ctx = fresh();
     const keep = seed(ctx, "Keep");
     const drop = seed(ctx, "Drop");
     setCurrent(ctx.host(), keep);
-    historyAction(ctx.host({ history_action: "trash" }), [chatDir(ctx.host(), drop)]);
+    historyAction(ctx.host({ history_action: "delete" }), [chatDir(ctx.host(), drop)]);
     expect(getCurrent(ctx.host())).toBe(keep);
   });
 });
 
 describe("retention", () => {
-  test("failure: retention of 7 days with a pinned and an unpinned 30-day-old chat trashes only the unpinned one", () => {
+  test("failure: retention of 7 days with a pinned and an unpinned 30-day-old chat deletes only the unpinned one", () => {
     const ctx = fresh({ retention_days: "7" });
     const pinned = seed(ctx, "Old pinned", { pinned: true, ageDays: 30 });
     const idle = seed(ctx, "Old idle", { ageDays: 30 });
@@ -149,7 +176,6 @@ describe("retention", () => {
     expect(existsSync(chatDir(ctx.host(), pinned))).toBe(true);
     expect(existsSync(chatDir(ctx.host(), idle))).toBe(false);
     expect(existsSync(chatDir(ctx.host(), fresher))).toBe(true);
-    expect(readdirSync(join(ctx.dir, "Trash"))).toEqual([idle]);
   });
 
   test("a chat with an open request is never pruned", async () => {
@@ -230,10 +256,10 @@ describe("titles and export", () => {
     expect(getChat(ctx.host(), other)!.title).toBe("Fresh Title");
   });
 
-  test("failure: a result after the chat folder was trashed recreates nothing; a failed or unreadable title changes nothing", () => {
+  test("failure: a result after the chat folder was deleted recreates nothing; a failed or unreadable title changes nothing", () => {
     const ctx = fresh();
     const id = seed(ctx, "New chat");
-    ctx.host().trash(chatDir(ctx.host(), id));
+    ctx.host().remove(chatDir(ctx.host(), id));
     expect(() => finalizer(ctx.host(), record(id), outcome("Ghost Title"))).not.toThrow();
     expect(existsSync(chatDir(ctx.host(), id))).toBe(false);
     const live = seed(ctx, "New chat");

@@ -151,17 +151,18 @@ describe("generated workflow", () => {
 
   test("the configuration holds every field the code reads, with the API key required, empty, and not exported", () => {
     const fields = new Map((info.userconfigurationconfig as any[]).map((f) => [f.variable, f]));
-    const expected = ["openrouter_api_key", "keyword_chat", "keyword_chat_alias", "keyword_models", "keyword_presets", "keyword_image", "default_model", "system_prompt", "system_context", "max_context", "timeout_seconds", "pdf_engine", "web_default", "web_max_results", "reasoning_default", "keep_reasoning", "sources_style", "preset_clipboard", "auto_titles", "title_model", "translate_language", "export_folder", "images_folder", "image_model", "image_timeout_seconds", "vision_fallback_model", "retention_days", "max_chats", "text_attachment_max_kb", "image_max_edge"];
+    const expected = ["openrouter_api_key", "keyword_chat", "keyword_chat_alias", "keyword_models", "keyword_presets", "keyword_image", "default_model", "privacy_mode", "system_prompt", "system_context", "max_context", "timeout_seconds", "pdf_engine", "web_default", "web_max_results", "web_rewrite", "reasoning_default", "keep_reasoning", "preset_clipboard", "auto_titles", "title_model", "translate_language", "export_folder", "images_folder", "image_model", "image_save_prompt", "image_timeout_seconds", "vision_fallback_model", "retention_days", "max_chats", "text_attachment_max_kb", "image_max_edge"];
     expect([...fields.keys()]).toEqual(expected);
     expect(fields.get("openrouter_api_key").config).toMatchObject({ required: true, default: "" });
     expect(info.variablesdontexport).toEqual(["openrouter_api_key"]);
     expect(fields.get("pdf_engine").config.pairs.map((pair: string[]) => pair[1])).toEqual(["auto", "free", "ocr", "native"]);
     expect(fields.get("reasoning_default").config.pairs.map((pair: string[]) => pair[1])).toEqual(["model", "off", "low", "medium", "high"]);
     expect(fields.get("web_default").config.default).toBe(false);
+    expect(fields.get("privacy_mode").config.default).toBe("deny");
+    expect(fields.get("privacy_mode").config.pairs.map((pair: string[]) => pair[1])).toEqual(["deny", "zdr", "standard"]);
+    expect(fields.get("web_rewrite").config.default).toBe(true);
     expect(fields.get("auto_titles").config.default).toBe(true);
     expect(fields.get("system_context").config.default).toBe(true);
-    expect(fields.get("sources_style").config.default).toBe("links");
-    expect(fields.get("sources_style").config.pairs.map((pair: string[]) => pair[1])).toEqual(["links", "icons"]);
     expect(fields.get("preset_clipboard").config.default).toBe(false);
     expect(fields.get("image_model").config.default).toBe("krea/krea-2-medium-turbo");
     expect(fields.get("system_prompt").config.default.length).toBeGreaterThan(200);

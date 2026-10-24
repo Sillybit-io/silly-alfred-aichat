@@ -70,14 +70,13 @@ function fresh(extra: Record<string, string> = {}, port = server.port) {
   mkdirSync(join(dir, "cache"), { recursive: true });
   mkdirSync(join(dir, "home"));
   writeFileSync(join(dir, "cache/models.json"), JSON.stringify({ fetchedAt: Date.now(), models: [] }));
-  const env = { PATH: process.env.PATH, HOME: join(dir, "home"), ...parseEnvFile(join(root, "tests/fixtures/dev.env")), alfred_workflow_data: join(dir, "data"), alfred_workflow_cache: join(dir, "cache"), aichat_api_base: `http://127.0.0.1:${port}/v1`, ...extra };
+  const env = { PATH: process.env.PATH, HOME: join(dir, "home"), ...parseEnvFile(join(root, "tests/fixtures/dev.env")), alfred_workflow_data: join(dir, "data"), alfred_workflow_cache: join(dir, "cache"), aichat_api_base: `http://127.0.0.1:${port}/v1`, image_save_prompt: "1", ...extra };
   const attrs = new Map<string, string>();
   const xattrCalls: string[][] = [];
   const session: Record<string, string> = {};
   const host = (more: Record<string, string> = {}) =>
     new BunHost({
       env: { ...env, ...session, ...more },
-      trashDir: join(dir, "Trash"),
       fakeCommands: {
         xattr: (args) => {
           xattrCalls.push(args);
@@ -147,6 +146,14 @@ describe("prompt parsing and files", () => {
 });
 
 describe("aiimage view", () => {
+  test("by default no prompt is written into the image file", async () => {
+    const ctx = fresh({ image_save_prompt: "0" });
+    await loop(aiimage, ctx, ["a quiet fox"]);
+    expect(files(ctx)).toHaveLength(1);
+    expect(ctx.xattrCalls.filter((call) => call[0] === "-w")).toEqual([]);
+    expect(ctx.attrs.size).toBe(0);
+  });
+
   test("happy: a media_type image/png response yields one .png in the images folder, the prompt in its xattr, and a Markdown image line", async () => {
     const ctx = fresh();
     const first = step(aiimage, ctx, ["a lighthouse --ar 16:9"]);

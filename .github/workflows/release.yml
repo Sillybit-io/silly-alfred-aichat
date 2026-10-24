@@ -29,11 +29,12 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: ".bun-version"
       - run: bun install --frozen-lockfile
+      - run: bun audit --audit-level=high
       - run: bun run check
       - run: bun test
       - run: bun run build
@@ -59,6 +60,10 @@ jobs:
       - run: bun run package
       - name: Write the release notes from the changelog
         run: bun run release:check "$RELEASE_TAG" --no-qa
+      - name: Add the checksum to the release notes
+        run: |
+          (cd dist && sha256sum AI-Chat.alfredworkflow > AI-Chat.alfredworkflow.sha256)
+          printf '\n\n**SHA-256** of `AI-Chat.alfredworkflow`: `%s`\n\nThe package is reproducible: `bun run package` on this tag gives the same checksum.\n' "$(cut -d' ' -f1 dist/AI-Chat.alfredworkflow.sha256)" >> dist/notes.md
       - name: Commit the bump to main
         run: |
           git config user.name "github-actions[bot]"
@@ -67,4 +72,4 @@ jobs:
           git diff --cached --quiet || git commit -m "release: $RELEASE_TAG"
           git push origin HEAD:main
       - name: Create the release and its tag
-        run: gh release create "$RELEASE_TAG" dist/AI-Chat.alfredworkflow --target "$(git rev-parse HEAD)" --title "AI Chat $RELEASE_TAG" --notes-file dist/notes.md
+        run: gh release create "$RELEASE_TAG" dist/AI-Chat.alfredworkflow dist/AI-Chat.alfredworkflow.sha256 --target "$(git rev-parse HEAD)" --title "AI Chat $RELEASE_TAG" --notes-file dist/notes.md

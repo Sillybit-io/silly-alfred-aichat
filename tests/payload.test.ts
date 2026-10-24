@@ -24,7 +24,7 @@ const optional = normalizeModel({
 
 const png: AttachmentPart = { kind: "image", name: "shot.png", mime: "image/png", base64: "AAAA" };
 const pdf: AttachmentPart = { kind: "file", name: "doc.pdf", mime: "application/pdf", base64: "BBBB" };
-const base = { stream: true, pdfEngine: "auto" as const, web: false };
+const base = { stream: true, pdfEngine: "auto" as const, web: false, privacy: "standard" as const };
 
 describe("capabilities", () => {
   test("derives modalities, prices per million, and efforts", () => {

@@ -1,6 +1,7 @@
 import type { ModelRecord } from "../core/capabilities";
-import type { ContextTurn, PayloadOptions, PdfEngine } from "../core/payload";
+import type { ContextTurn, PayloadOptions, PdfEngine, PrivacyMode } from "../core/payload";
 import type { StreamState } from "../core/stream";
+import { keyProblem } from "../host/common";
 import type { Host } from "../host/types";
 import type { Chat, Message } from "../store/chats";
 import type { Draft, Finalizers, Outcome, RequestKind, RequestRecord } from "../store/requests";
@@ -13,11 +14,14 @@ import { feature as web } from "./web";
 
 // Workflow Configuration arrives as environment variables; checkboxes are "1" or "0".
 export type Config = {
+  // Empty when missing or unusable; keyIssue then says why a present key was refused.
   apiKey: string;
+  keyIssue: string | null;
   defaultModel: string;
+  privacy: PrivacyMode;
+  webRewrite: boolean;
   systemPrompt: string;
   systemContext: boolean;
-  sourcesIcons: boolean;
   presetClipboard: boolean;
   maxContext: number;
   timeoutSeconds: number;
@@ -32,6 +36,7 @@ export type Config = {
   exportFolder: string;
   imagesFolder: string;
   imageModel: string;
+  savePrompts: boolean;
   imageTimeoutSeconds: number;
   visionFallbackModel: string;
   retentionDays: number;
@@ -54,12 +59,17 @@ function text(value: string | undefined, fallback: string): string {
 export function readConfig(host: Host): Config {
   const env = host.env;
   const engine = text(env.pdf_engine, "auto");
+  const privacy = text(env.privacy_mode, "deny");
+  const key = (env.openrouter_api_key ?? "").trim();
+  const keyIssue = keyProblem(key);
   return {
-    apiKey: (env.openrouter_api_key ?? "").trim(),
+    apiKey: keyIssue === null ? key : "",
+    keyIssue,
     defaultModel: text(env.default_model, FALLBACK_MODEL),
+    privacy: privacy === "standard" || privacy === "zdr" ? privacy : "deny",
+    webRewrite: env.web_rewrite !== "0",
     systemPrompt: env.system_prompt ?? "",
     systemContext: env.system_context !== "0",
-    sourcesIcons: env.sources_style === "icons",
     presetClipboard: env.preset_clipboard === "1",
     maxContext: Math.max(1, int(env.max_context, 20)),
     timeoutSeconds: Math.max(5, int(env.timeout_seconds, 90)),
@@ -74,6 +84,7 @@ export function readConfig(host: Host): Config {
     exportFolder: text(env.export_folder, "~/Documents/AI Chat"),
     imagesFolder: text(env.images_folder, "~/Pictures/AI Chat"),
     imageModel: text(env.image_model, ""),
+    savePrompts: env.image_save_prompt === "1",
     imageTimeoutSeconds: Math.max(10, int(env.image_timeout_seconds, 300)),
     visionFallbackModel: text(env.vision_fallback_model, ""),
     retentionDays: Math.max(0, int(env.retention_days, 0)),

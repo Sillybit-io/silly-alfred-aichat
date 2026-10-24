@@ -4,10 +4,10 @@ You release from GitHub: open **Actions → Release → Run workflow**, pick `ma
 
 ## What the workflow does
 
-1. **Checks.** Typecheck, tests, build, the stale `Workflow/` check.
+1. **Checks.** Dependency audit (`bun audit`), typecheck, tests, build, the stale `Workflow/` check.
 2. **Bump.** The `bump` input picks the version. `auto` (the default) releases the version in `package.json` as it is if it was never released, and otherwise counts the patch up; `patch`, `minor`, and `major` count up from the current version.
 3. **Changelog.** `## Unreleased` in `CHANGELOG.md` becomes `## <version> — <date>`, with a fresh, empty `## Unreleased` above it. An empty `## Unreleased` stops the run, so write the notes there as you work.
-4. **Package.** It builds `AI-Chat.alfredworkflow` and writes the release notes from that version's changelog section.
+4. **Package.** It builds `AI-Chat.alfredworkflow` and writes the release notes from that version's changelog section and adds the package's SHA-256 to them. The `.sha256` file is attached to the release too. The package is reproducible, so anyone can rebuild it from the tag and compare.
 5. **Publish.** It commits `package.json`, `CHANGELOG.md`, and `Workflow/info.plist` to `main` as `release: v<version>`, then creates the tag and the GitHub release with the archive and the notes.
 
 If a run fails before the commit, nothing changed. If it fails after the commit, run it again with `auto`: the version is already bumped, so it only publishes. If `main` protects pushes from `github-actions[bot]`, allow the bot, or the commit step fails.

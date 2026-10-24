@@ -1,5 +1,17 @@
 ## Unreleased
 
+**Security and privacy**
+
+- The API key reaches `curl` on standard input (`-K -`), so it is no longer in any command line, and the long-running request does not inherit it in its environment. A key with a line break or control character is refused with a clear message.
+- Replies can no longer make the view fetch anything: images are shown as `🖼 image not loaded: <address>`, HTML is shown as text, and only `https` links stay, with tracking parameters removed and the site named after them. Copies, exports, and preset results are cleaned the same way.
+- Provider Privacy setting: every chat request asks for providers that do not collect data (default), for zero data retention only, or is left standard. Web Follow-ups can be turned off, next to Titles.
+- Chat data is private to you: folders `700`, files `600`, applied to existing data on the first run. The request file that holds the conversation is deleted as soon as the request ends, and request folders that nothing will pick up are swept. A reply that finished while the window was closed waits for your next visit, however long that is.
+- Deleting a chat asks first and then erases it for good instead of using the Trash. Retention removes chats the same way.
+- Generated images no longer carry their prompt in the file unless Image Prompts is turned on.
+- Site icons are gone, along with the lookup that sent each cited site to a third party.
+- Only `https` is used, also across redirects. The test hooks that could redirect requests are switched off in the shipped bundles, which always use OpenRouter and `/usr/bin/curl`.
+- The release workflow pins its actions to commit SHAs, audits the dependencies, and publishes a SHA-256 checksum; Dependabot keeps the pins current.
+
 ## 0.1.0 — 2026-10-22
 
 - Streaming chat in an Alfred Text View with stop, reopen, retry, and copy actions.

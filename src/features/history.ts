@@ -1,6 +1,8 @@
 import { cleanTitle, fileSafe, TITLE_PROMPT } from "../core/titles";
 import { buildBody, chatUrl, encodeBody } from "../core/payload";
+import { sanitizeMarkdown } from "../core/sanitize";
 import { renderTranscript } from "../core/transcript";
+import { imagesFolder } from "../store/images";
 import type { Host } from "../host/types";
 import { getChat, mutateChat, NotFoundError, setTitleIfAuto, setTitleManual, type Chat } from "../store/chats";
 import { admit, type Finalizers } from "../store/requests";
@@ -39,7 +41,7 @@ function requestTitle(host: Host, config: Config, chatId: string): void {
         { role: "system", content: TITLE_PROMPT },
         { role: "user", content: `User: ${clip(user.content, 600)}\n\nAssistant: ${clip(assistant?.content ?? "", 600)}` },
       ],
-      { modelId, model: null, stream: false, pdfEngine: "auto", web: false },
+      { modelId, model: null, stream: false, pdfEngine: "auto", web: false, privacy: config.privacy },
     ),
   );
   admit(host, {
@@ -76,7 +78,7 @@ const titleFinalizer: NonNullable<Finalizers["title"]> = (host, record, outcome)
   try {
     setTitleIfAuto(host, record.chatId, title);
   } catch (error) {
-    // A chat trashed in the meantime stays gone; nothing is recreated.
+    // A chat deleted in the meantime stays gone; nothing is recreated.
     if (!(error instanceof NotFoundError)) throw error;
   }
 };
@@ -87,7 +89,7 @@ function exportChat(host: Host, config: Config, chat: Chat): string {
   const title = displayTitle(chat);
   const date = new Date(host.nowMs()).toISOString().slice(0, 10);
   const visible: Chat = chat.settings.showReasoning ? chat : { ...chat, messages: chat.messages.map(({ reasoning: _hidden, ...rest }) => rest) };
-  const text = `# ${title}\n\n_Exported ${date}${chat.model ? ` · ${chat.model}` : ""}_\n\n${renderTranscript(visible)}\n`;
+  const text = `${sanitizeMarkdown(`# ${title}\n\n_Exported ${date}${chat.model ? ` · ${chat.model}` : ""}_\n\n${renderTranscript(visible)}`, { imageRoots: [imagesFolder(host, config)] })}\n`;
   const base = `${folder}/${date} ${fileSafe(title)}`;
   let path = `${base}.md`;
   for (let n = 2; host.exists(path); n++) path = `${base} ${n}.md`;

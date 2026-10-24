@@ -25,8 +25,8 @@ const roots: string[] = [];
 function fresh() {
   const dir = mkdtempSync(join(tmpdir(), "aichat-chats-"));
   roots.push(dir);
-  const host = new BunHost({ env: { alfred_workflow_data: join(dir, "data"), alfred_workflow_cache: join(dir, "cache") }, trashDir: join(dir, "Trash") });
-  return { dir, host, trash: join(dir, "Trash") };
+  const host = new BunHost({ env: { alfred_workflow_data: join(dir, "data"), alfred_workflow_cache: join(dir, "cache") } });
+  return { dir, host };
 }
 afterAll(() => roots.forEach((dir) => rmSync(dir, { recursive: true, force: true })));
 
@@ -85,23 +85,22 @@ describe("chats", () => {
     expect(setTitleIfAuto(host, second.id, "Auto").title).toBe("Auto");
   });
 
-  test("trashing the folder between a mutation's read and write raises NotFound and recreates nothing", () => {
-    const { host, trash } = fresh();
+  test("deleting the folder between a mutation's read and write raises NotFound and recreates nothing", () => {
+    const { host } = fresh();
     const chat = createChat(host);
     expect(() =>
       mutateChat(host, chat.id, (c) => {
-        host.trash(chatDir(host, chat.id));
+        host.remove(chatDir(host, chat.id));
         c.messages.push(message("late"));
       }),
     ).toThrow(NotFoundError);
     expect(host.exists(chatDir(host, chat.id))).toBe(false);
-    expect(readdirSync(trash)).toHaveLength(1);
     expect(() => mutateChat(host, chat.id, () => {})).toThrow(NotFoundError);
     expect(host.exists(chatDir(host, chat.id))).toBe(false);
   });
 
-  test("prune with retention 1 day keeps a pinned 10-day-old chat and an active one, and trashes an idle unpinned one", () => {
-    const { host, trash } = fresh();
+  test("prune with retention 1 day keeps a pinned 10-day-old chat and an active one, and deletes an idle unpinned one", () => {
+    const { host } = fresh();
     const old = host.nowMs() - 10 * 86_400_000;
     const make = (flags: { pinned?: boolean }) => {
       const chat = createChat(host);
@@ -116,13 +115,12 @@ describe("chats", () => {
     const active = make({});
     const idle = make({});
     const recent = createChat(host).id;
-    const trashed = pruneChats(host, 1, 0, new Set([active]));
-    expect(trashed).toEqual([idle]);
+    const pruned = pruneChats(host, 1, 0, new Set([active]));
+    expect(pruned).toEqual([idle]);
     expect(host.exists(chatDir(host, pinned))).toBe(true);
     expect(host.exists(chatDir(host, active))).toBe(true);
     expect(host.exists(chatDir(host, recent))).toBe(true);
     expect(host.exists(chatDir(host, idle))).toBe(false);
-    expect(readdirSync(trash)).toEqual([idle]);
   });
 
   test("prune by count keeps the newest and never touches pinned chats", () => {
@@ -130,8 +128,8 @@ describe("chats", () => {
     const ids = [1, 2, 3, 4].map(() => createChat(host).id);
     host.sleepMs(5);
     mutateChat(host, ids[0]!, (c) => { c.pinned = true; });
-    const trashed = pruneChats(host, 0, 2, []);
-    expect(trashed.length).toBe(2);
+    const pruned = pruneChats(host, 0, 2, []);
+    expect(pruned.length).toBe(2);
     expect(host.exists(chatDir(host, ids[0]!))).toBe(true);
   });
 

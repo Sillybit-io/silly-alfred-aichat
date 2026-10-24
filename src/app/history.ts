@@ -36,7 +36,7 @@ function itemFor(host: Host, summary: ChatSummary, now: number): Item {
     mods: {
       cmd: modItem(summary.archived ? "Restore from the archive" : "Archive this chat", folder, "archive"),
       alt: modItem(summary.pinned ? "Unpin this chat" : "Pin this chat", folder, "pin"),
-      ctrl: modItem("Move this chat to the Trash", folder, "trash"),
+      ctrl: modItem("Delete this chat permanently", folder, "delete"),
     },
   };
 }

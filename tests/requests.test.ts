@@ -82,7 +82,7 @@ function fresh() {
   const dir = join(work, `case-${counter++}`);
   mkdirSync(dir);
   const data = join(dir, "data");
-  const host = new BunHost({ env: { alfred_workflow_data: data, alfred_workflow_cache: join(dir, "cache") }, trashDir: join(dir, "Trash") });
+  const host = new BunHost({ env: { alfred_workflow_data: data, alfred_workflow_cache: join(dir, "cache") } });
   const chat = createChat(host, { model: "test/model" });
   return { dir, data, host, chat };
 }

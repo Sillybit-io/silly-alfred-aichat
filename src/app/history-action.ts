@@ -24,9 +24,16 @@ export function applyHistoryAction(host: Host, action: string, folderArg: string
       });
       return { next: "list", notice: "" };
     }
-    if (action === "trash") {
+    if (action === "delete") {
+      const title = getChat(host, id)?.title ?? "this chat";
+      if (!host.confirm(`Delete “${title}” permanently? Its messages and attachments cannot be recovered.`, "Delete")) return { next: "list", notice: "The chat was not deleted" };
       mutateChat(host, id, () => false);
-      host.trash(chatDir(host, id));
+      try {
+        host.remove(chatDir(host, id));
+      } catch (error) {
+        host.log(`could not delete chat ${id}: ${String(error)}`);
+        return { next: "list", notice: "The chat could not be deleted" };
+      }
       if (getCurrent(host) === id) clearCurrent(host);
       return { next: "list", notice: "" };
     }

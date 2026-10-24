@@ -2,6 +2,7 @@ import { describeFailure, lastStatus, type MappedError } from "../core/errors";
 import { newFramer, type FramerState } from "../core/sse";
 import { newStreamState, consume, type Annotation, type StreamState } from "../core/stream";
 import { newId } from "../core/ids";
+import { CURL_STDIN_CONFIG, curlAuthConfig, curlBinary, curlProtocolArgs } from "../host/common";
 import type { Host } from "../host/types";
 import { dataDir, getChat, mutateChat, NotFoundError, type AttachmentRef } from "./chats";
 import { withLock } from "./lock";
@@ -131,10 +132,6 @@ export function currentRecord(host: Host, lane: string): RequestRecord | null {
   return rid === null ? null : loadRecord(host, rid);
 }
 
-function curlPath(host: Host): string {
-  return host.env.aichat_curl ?? "/usr/bin/curl";
-}
-
 // The process that owns this request's output, or null when the recorded pid is gone or reused.
 function ownedPid(host: Host, record: RequestRecord): number | null {
   const files = transport(host, record.id);
@@ -154,12 +151,12 @@ function transportEnded(host: Host, record: RequestRecord): boolean {
 }
 
 function curlArgs(host: Host, input: AdmitInput, files: ReturnType<typeof transport>): string[] {
-  const args = [curlPath(host), "-o", files.out, "-D", files.headers, "--silent", "--show-error", "--connect-timeout", "15"];
+  const args = [curlBinary(host.env), ...curlProtocolArgs(input.url), "-o", files.out, "-D", files.headers, "--silent", "--show-error", "--connect-timeout", "15"];
   if (input.stream) args.push("--no-buffer", "--speed-limit", "1", "--speed-time", String(input.timeoutSeconds));
   else args.push("--max-time", String(input.timeoutSeconds));
   args.push(
+    ...CURL_STDIN_CONFIG,
     "-H", "Content-Type: application/json",
-    "-H", `Authorization: Bearer ${input.apiKey}`,
     "-H", `HTTP-Referer: ${REFERER}`,
     "-H", "X-Title: Alfred AI Chat",
     "--data-binary", `@${files.body}`,
@@ -176,6 +173,7 @@ function withLaneLock<T>(host: Host, lane: string, fn: () => T): T {
 // Admission: refused while the lane's record is open and its process is alive. A record whose
 // transport ended is finalized first, so the lane is free before the new one is written.
 export function admit(host: Host, input: AdmitInput, finalizers: Finalizers = {}): AdmitResult {
+  const authConfig = curlAuthConfig(input.apiKey);
   return withLaneLock(host, input.lane, () => {
     const existing = laneRecordId(host, input.lane);
     if (existing !== null) {
@@ -229,7 +227,7 @@ export function admit(host: Host, input: AdmitInput, finalizers: Finalizers = {}
         if (!(error instanceof NotFoundError)) throw error;
       }
     }
-    host.spawnSupervised(curlArgs(host, input, files), { pid: files.pid, exit: files.exit, stderr: files.stderr });
+    host.spawnSupervised(curlArgs(host, input, files), { pid: files.pid, exit: files.exit, stderr: files.stderr, remove: files.body }, { stdin: authConfig });
     return { ok: true, rid } as const;
   });
 }

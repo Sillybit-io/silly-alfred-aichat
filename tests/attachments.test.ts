@@ -58,7 +58,7 @@ function write(dir: string, name: string, data: Uint8Array | string) {
 
 function payloadContext(env: ReturnType<typeof fresh>, over: Partial<PayloadContext> & { modelId: string }): PayloadContext {
   const chat = getChat(env.host, env.chat.id)!;
-  const options: PayloadOptions = { modelId: over.modelId, model: over.model ?? model(over.modelId) ?? null, stream: true, pdfEngine: "auto", web: false };
+  const options: PayloadOptions = { modelId: over.modelId, model: over.model ?? model(over.modelId) ?? null, stream: true, pdfEngine: "auto", web: false, privacy: "standard" };
   return {
     host: env.host,
     config: env.config,

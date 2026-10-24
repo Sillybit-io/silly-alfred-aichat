@@ -90,7 +90,7 @@ function fresh(extra: Record<string, string> = {}): Ctx {
 }
 
 function hostFor(ctx: Ctx, extra: Record<string, string> = {}) {
-  return new BunHost({ env: { ...ctx.env, ...ctx.session, ...extra }, trashDir: join(ctx.dir, "Trash") });
+  return new BunHost({ env: { ...ctx.env, ...ctx.session, ...extra } });
 }
 
 type Frame = { response: string; footer: string; behaviour: { response: string; scroll: string; inputfield: string }; variables: { request_id: string; view_stage: string }; rerun?: number };

@@ -19,7 +19,7 @@ Typing `aichat` shows a list: **Continue** your current chat, start a **New chat
 * <kbd>↩︎</kbd> Continue the chat (sending the text you typed) or open the chat you picked.
 * <kbd>⌘</kbd><kbd>↩︎</kbd> On Continue, start a new chat instead. On a chat, archive or restore it.
 * <kbd>⌥</kbd><kbd>↩︎</kbd> On a chat, pin or unpin it.
-* <kbd>⌃</kbd><kbd>↩︎</kbd> On a chat, move it to the Trash.
+* <kbd>⌃</kbd><kbd>↩︎</kbd> On a chat, delete it permanently (you are asked to confirm).
 
 ![A streaming reply](Workflow/images/about/chat-streaming.png)
 
@@ -38,7 +38,7 @@ A reply that stalls, fails, or is cut off keeps its text, and a message that cou
 
 In a chat with web search on, a follow-up like "What about tomorrow?" is first turned into a standalone message with the title model, so the search knows the subject. Your own wording stays in the chat, and the footer shows what was searched.
 
-Replies that used web search end with one line of short links, one per site. Type `/sources` to list every source in full. The Sources setting can add each site's icon before its link; that is experimental, because Alfred cannot make an icon itself a link.
+Replies that used web search end with one line of short links, one per site. Type `/sources` to list every source in full. Only secure `https` addresses are listed, without tracking parameters, and no site icons are downloaded.
 
 ![Sources under an answer](Workflow/images/about/sources.png)
 
@@ -84,7 +84,7 @@ Type words to filter by title or first message; type `archived` to list archived
 * <kbd>↩︎</kbd> Open the chat.
 * <kbd>⌘</kbd><kbd>↩︎</kbd> Archive or restore it.
 * <kbd>⌥</kbd><kbd>↩︎</kbd> Pin or unpin it. Pinned chats stay on top and are never deleted.
-* <kbd>⌃</kbd><kbd>↩︎</kbd> Move it to the Trash.
+* <kbd>⌃</kbd><kbd>↩︎</kbd> Delete it permanently (you are asked to confirm).
 
 ### Generate images
 
@@ -128,6 +128,19 @@ Type these in the chat Text View. `/help` lists them.
 | `/pin` | Pin or unpin the chat. |
 | `/archive` | Archive or restore the chat. |
 
+## Privacy and security
+
+Your conversations are private, so the workflow keeps them that way. [FAQ](FAQ.md) has the details; this is the short version.
+
+* **What leaves your Mac.** Your messages, the earlier messages sent as context, and your attachments go to OpenRouter and the model provider it picks. A web follow-up and an automatic chat title each send one small extra request that carries part of the chat; turn them off with **Web Follow-ups** and **Titles** in the configuration. Nothing else leaves: no analytics, no site icons, no downloaded code.
+* **Provider Privacy.** By default every request asks OpenRouter to use only providers that do not store or train on your prompts. **Zero data retention only** is stricter and **Standard** allows any provider your account allows. Some models have no provider under the stricter choices. Image generation follows your OpenRouter privacy settings, because its API takes no such option.
+* **Your API key.** Alfred keeps it, unencrypted, in the workflow's preferences on your Mac, and leaves it out of exported copies. The workflow gives it to `curl` on standard input, so it is not in any command line and is not inherited by the request that keeps running. (Alfred itself puts it in the environment of the short script it starts, which lasts a moment for a chat reply and as long as the request for titles, presets, and web follow-ups.)
+* **Replies are cleaned before you see them.** A reply cannot make the view fetch an address: an image is shown as text with its address (`🖼 image not loaded: …`), HTML is shown as text, and only `https` links stay, without tracking parameters. The same goes for copies and exports. Pictures the workflow saved itself still show.
+* **Files on your Mac.** Chats, attachments, and presets are plain files in the workflow's data folder, readable only by you. The request file that holds a conversation is deleted when the request ends. Generated images do not carry their prompt unless you turn on **Image Prompts**.
+* **Deleting is permanent.** Deleting a chat, or retention removing an old one, erases it at once and does not use the Trash. macOS cannot securely erase flash storage, so turn on FileVault for protection at rest.
+
+This does not protect you from other software running as you, from an administrator, or from someone who reads an unencrypted disk. Spotlight and Time Machine are not controlled by the workflow; see the FAQ.
+
 ## Keywords
 
 Every keyword can be changed in the workflow's configuration.
@@ -144,6 +157,7 @@ Every keyword can be changed in the workflow's configuration.
 
 * [FAQ](FAQ.md): stalls, stopping, presets, the file picker, and debugging.
 * [Changelog](CHANGELOG.md).
+* [Security checks on a Mac](docs/security-checks.md): what to verify by hand before a release.
 
 ## License
 

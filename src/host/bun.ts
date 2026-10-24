@@ -1,8 +1,9 @@
 import {
+  chmodSync,
   closeSync,
-  cpSync,
   existsSync,
   fstatSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -14,16 +15,16 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { commandFromPs, isSafePid, killArgv, psArgv, supervisorArgv } from "./common";
+import { commandFromPs, isSafePid, killArgv, psArgv, redact, scrubbedEnv, supervisorArgv } from "./common";
 import type { ChooseFilesOptions, ChooseFilesResult, FileStat, Host, RunResult, SupervisorFiles } from "./types";
 
-export type FakeCommand = (args: string[]) => RunResult;
+export type FakeCommand = (args: string[], stdin?: string) => RunResult;
 
 export type BunHostOptions = {
   env?: Record<string, string | undefined>;
-  trashDir?: string;
+  // Answers the delete confirmation; accepts when absent so tests and `bun run dev` are not blocked by a dialog.
+  confirm?: (message: string, action: string) => boolean;
   chooseFiles?: (options: ChooseFilesOptions) => ChooseFilesResult;
   clipboardPng?: () => Uint8Array | null;
   clipboardText?: () => string | null;
@@ -34,14 +35,12 @@ export type BunHostOptions = {
 
 export class BunHost implements Host {
   env: Record<string, string | undefined>;
-  readonly trashDir: string;
   readonly calls: string[][] = [];
   readonly logs: string[] = [];
   private counter = 0;
 
   constructor(private readonly options: BunHostOptions = {}) {
     this.env = { ...(options.env ?? process.env) };
-    this.trashDir = options.trashDir ?? join(tmpdir(), "aichat-trash");
   }
 
   readText(path: string): string {
@@ -69,7 +68,7 @@ export class BunHost implements Host {
   writeAtomic(path: string, data: Uint8Array | string): void {
     const temp = `${path}.tmp-${process.pid}-${this.counter++}`;
     try {
-      writeFileSync(temp, data, { flag: "wx" });
+      writeFileSync(temp, data, { flag: "wx", mode: 0o600 });
       renameSync(temp, path);
     } catch (error) {
       try {
@@ -82,12 +81,12 @@ export class BunHost implements Host {
   }
 
   mkdirp(path: string): void {
-    mkdirSync(path, { recursive: true });
+    mkdirSync(path, { recursive: true, mode: 0o700 });
   }
 
   mkdirExclusive(path: string): boolean {
     try {
-      mkdirSync(path);
+      mkdirSync(path, { mode: 0o700 });
       return true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
@@ -104,16 +103,19 @@ export class BunHost implements Host {
     rmSync(path, { recursive: true, force: true });
   }
 
-  trash(path: string): void {
-    mkdirSync(this.trashDir, { recursive: true });
-    let target = join(this.trashDir, basename(path));
-    while (existsSync(target)) target = join(this.trashDir, `${basename(path)}-${this.counter++}`);
+  restrict(path: string): void {
+    let info;
     try {
-      renameSync(path, target);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
-      cpSync(path, target, { recursive: true });
-      rmSync(path, { recursive: true, force: true });
+      info = lstatSync(path);
+    } catch {
+      return;
+    }
+    if (info.isSymbolicLink()) return;
+    if (info.isDirectory()) {
+      chmodSync(path, 0o700);
+      for (const name of readdirSync(path)) this.restrict(join(path, name));
+    } else {
+      chmodSync(path, 0o600);
     }
   }
 
@@ -134,11 +136,12 @@ export class BunHost implements Host {
     return readdirSync(path);
   }
 
-  spawnSupervised(argv: string[], files: SupervisorFiles): void {
+  spawnSupervised(argv: string[], files: SupervisorFiles, options: { stdin?: string } = {}): void {
     const child = Bun.spawn(supervisorArgv(argv, files), {
-      stdin: "ignore",
+      stdin: options.stdin === undefined ? "ignore" : Buffer.from(options.stdin),
       stdout: "ignore",
       stderr: "ignore",
+      env: scrubbedEnv(this.env),
       detached: true,
     });
     child.unref();
@@ -158,15 +161,15 @@ export class BunHost implements Host {
     }
   }
 
-  runSync(argv: string[], options: { timeoutMs?: number } = {}): RunResult {
+  runSync(argv: string[], options: { timeoutMs?: number; stdin?: string } = {}): RunResult {
     this.calls.push(argv);
     const fake = this.options.fakeCommands?.[basename(argv[0] ?? "")];
-    if (fake) return fake(argv.slice(1));
+    if (fake) return fake(argv.slice(1), options.stdin);
     const result = Bun.spawnSync(argv, {
-      stdin: "ignore",
+      stdin: options.stdin === undefined ? "ignore" : Buffer.from(options.stdin),
       stdout: "pipe",
       stderr: "pipe",
-      env: this.env as Record<string, string>,
+      env: scrubbedEnv(this.env),
       timeout: options.timeoutMs,
     });
     return {
@@ -188,6 +191,10 @@ export class BunHost implements Host {
     return crypto.randomUUID().replace(/-/g, "");
   }
 
+  confirm(message: string, action: string): boolean {
+    return this.options.confirm ? this.options.confirm(message, action) : true;
+  }
+
   chooseFiles(options: ChooseFilesOptions = {}): ChooseFilesResult {
     return this.options.chooseFiles ? this.options.chooseFiles(options) : { cancelled: true };
   }
@@ -201,8 +208,9 @@ export class BunHost implements Host {
   }
 
   log(message: string): void {
-    this.logs.push(message);
-    if (this.options.onLog) this.options.onLog(message);
-    else process.stderr.write(`${message}\n`);
+    const text = redact(message, this.env);
+    this.logs.push(text);
+    if (this.options.onLog) this.options.onLog(text);
+    else process.stderr.write(`${text}\n`);
   }
 }

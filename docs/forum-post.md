@@ -21,7 +21,9 @@ What it does:
 - Chat history with automatic titles, pin, archive, Markdown export, and optional retention.
 - Image generation with `aiimage` or `/image`.
 
-It is plain JavaScript for Automation scripts: nothing to install, no binaries, no auto-updater, no telemetry. The code is BSD 3-Clause and borrows the Text View streaming pattern from the OpenAI workflow by Running with Crayons.
+It is plain JavaScript for Automation scripts: nothing to install, no binaries, no auto-updater, no telemetry, and no site-icon lookups. The code is BSD 3-Clause and borrows the Text View streaming pattern from the OpenAI workflow by Running with Crayons.
+
+Privacy: requests carry no-data-collection provider rules by default (zero-data-retention is one setting away), your API key never appears in a command line, replies cannot make the view fetch an image or open a non-https link, chat files are owner-only, and deleting a chat erases it for good. The README's Privacy and security section lists what still leaves your Mac and what the workflow cannot protect against.
 
 Needs macOS 14+ and Alfred 5.5+ with the Powerpack, and an OpenRouter API key (paste it into the workflow configuration). OpenRouter bills web search, OCR, and reasoning per use, so the workflow keeps web search and OCR off until you ask for them.
 

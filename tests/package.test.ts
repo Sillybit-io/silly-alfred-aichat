@@ -122,9 +122,10 @@ describe("CI workflows", () => {
   test("CI runs on push and pull_request with the pinned toolchain and the stale-bundle check", () => {
     expect(Object.keys(ci.on).sort()).toEqual(["pull_request", "push"]);
     const steps = ci.jobs.test.steps;
-    expect(steps[0].uses).toBe("actions/checkout@v7");
-    expect(steps[1]).toMatchObject({ uses: "oven-sh/setup-bun@v2", with: { "bun-version-file": ".bun-version" } });
-    expect(runs(ci.jobs.test)).toEqual(["bun install --frozen-lockfile", "bun run check", "bun test", "bun run build", "bun run plist", "git diff --exit-code -- Workflow", "bun run package"]);
+    expect(steps[0]).toMatchObject({ uses: expect.stringMatching(/^actions\/checkout@[0-9a-f]{40}$/), with: { "persist-credentials": false } });
+    expect(steps[1]).toMatchObject({ uses: expect.stringMatching(/^oven-sh\/setup-bun@[0-9a-f]{40}$/), with: { "bun-version-file": ".bun-version" } });
+    expect(ci.permissions).toEqual({ contents: "read" });
+    expect(runs(ci.jobs.test)).toEqual(["bun install --frozen-lockfile", "bun audit --audit-level=high", "bun run check", "bun test", "bun run build", "bun run plist", "git diff --exit-code -- Workflow", "bun run package"]);
   });
 
   test("release is a manual workflow on main that checks, bumps, commits, and publishes with the changelog notes", () => {
@@ -136,12 +137,27 @@ describe("CI workflows", () => {
     expect(job.permissions).toEqual({ contents: "write" });
     expect(job.env.GH_TOKEN).toBe("${{ secrets.GITHUB_TOKEN }}");
     const commands = runs(job);
-    expect(commands.slice(0, 6)).toEqual(runs(ci.jobs.test).slice(0, 6));
-    const order = ["bun run bump \"$kind\"", "bun run package", 'bun run release:check "$RELEASE_TAG" --no-qa', "git push origin HEAD:main", "gh release create"].map((word) => commands.findIndex((command: string) => command.includes(word)));
+    expect(commands.slice(0, 7)).toEqual(runs(ci.jobs.test).slice(0, 7));
+    const order = ["bun run bump \"$kind\"", "bun run package", 'bun run release:check "$RELEASE_TAG" --no-qa', "sha256sum", "git push origin HEAD:main", "gh release create"].map((word) => commands.findIndex((command: string) => command.includes(word)));
     expect(order.every((position: number) => position >= 0)).toBe(true);
     expect([...order].sort((x: number, y: number) => x - y)).toEqual(order);
-    expect(commands.find((command: string) => command.includes("gh release create"))).toBe('gh release create "$RELEASE_TAG" dist/AI-Chat.alfredworkflow --target "$(git rev-parse HEAD)" --title "AI Chat $RELEASE_TAG" --notes-file dist/notes.md');
+    expect(commands.find((command: string) => command.includes("gh release create"))).toBe('gh release create "$RELEASE_TAG" dist/AI-Chat.alfredworkflow dist/AI-Chat.alfredworkflow.sha256 --target "$(git rev-parse HEAD)" --title "AI Chat $RELEASE_TAG" --notes-file dist/notes.md');
     const uses = job.steps.map((step: any) => step.uses).filter(Boolean);
-    expect(uses.every((u: string) => u.startsWith("actions/") || u.startsWith("oven-sh/setup-bun"))).toBe(true);
+    expect(uses.every((u: string) => /^(actions\/checkout|oven-sh\/setup-bun)@[0-9a-f]{40}$/.test(u))).toBe(true);
+    const sums = commands.find((command: string) => command.includes("sha256sum"));
+    expect(sums).toContain("AI-Chat.alfredworkflow.sha256");
+    expect(sums).toContain(">> dist/notes.md");
+  });
+
+  test("every action in every workflow is pinned to a full commit SHA, and Dependabot keeps them current", () => {
+    for (const name of ["ci.yml", "release.yml"]) {
+      const text = readFileSync(join(root, ".github/workflows", name), "utf8");
+      for (const match of text.matchAll(/^\s*-?\s*uses:\s*(\S+)(.*)$/gm)) {
+        expect(match[1], `${name}: ${match[1]}`).toMatch(/@[0-9a-f]{40}$/);
+        expect(match[2], `${name}: the release is named in a comment`).toMatch(/# v\d+\.\d+\.\d+/);
+      }
+    }
+    const dependabot = parseYaml(readFileSync(join(root, ".github/dependabot.yml"), "utf8")) as any;
+    expect(dependabot.updates.map((update: any) => update["package-ecosystem"]).sort()).toEqual(["bun", "github-actions"]);
   });
 });

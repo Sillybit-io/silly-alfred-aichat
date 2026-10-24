@@ -85,7 +85,7 @@ export function main(host: Host, argv: string[]): string {
       mods: {
         cmd: mod("Archive this chat", folder, "archive"),
         alt: mod(summary.pinned ? "Unpin this chat" : "Pin this chat", folder, "pin"),
-        ctrl: mod("Move this chat to the Trash", folder, "trash"),
+        ctrl: mod("Delete this chat permanently", folder, "delete"),
       },
     });
   }

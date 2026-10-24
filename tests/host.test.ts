@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, readdirSync, renameSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, readdirSync, renameSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { main as probe } from "../src/app/probe";
@@ -130,7 +130,7 @@ describe("supervised transport", () => {
   test("the supervisor argument vector carries the script and its files", () => {
     const argv = supervisorArgv(["curl", "x"], { pid: "p", exit: "e", stderr: "s" });
     expect(argv.slice(0, 4)).toEqual(["/bin/sh", "-c", SUPERVISOR_SCRIPT, "sh"]);
-    expect(argv.slice(4)).toEqual(["p", "e", "s", "curl", "x"]);
+    expect(argv.slice(4)).toEqual(["p", "e", "s", "", "curl", "x"]);
     expect(() => supervisorArgv([], { pid: "p", exit: "e", stderr: "s" })).toThrow();
   });
 });
@@ -167,14 +167,49 @@ describe("file primitives", () => {
     expect(host.readBytesFrom(join(work, "bytes"), 9)).toHaveLength(0);
   });
 
-  test("trash moves into the trash folder without losing the item", () => {
-    const host = new BunHost({ trashDir: join(work, "Trash") });
+  test("remove deletes for good and a missing path is not an error", () => {
+    const host = new BunHost();
     writeFileSync(join(work, "victim"), "v");
-    host.trash(join(work, "victim"));
-    host.writeAtomic(join(work, "victim"), "again");
-    host.trash(join(work, "victim"));
+    host.remove(join(work, "victim"));
+    host.remove(join(work, "victim"));
     expect(existsSync(join(work, "victim"))).toBe(false);
-    expect(readdirSync(join(work, "Trash")).length).toBe(2);
+  });
+
+  test("everything the host creates is private, and restrict tightens what exists without following links", () => {
+    const host = new BunHost();
+    const folder = join(work, "private/nested/deeper");
+    host.mkdirp(folder);
+    host.writeAtomic(join(folder, "file"), "x");
+    expect(host.mkdirExclusive(join(work, "private/exclusive"))).toBe(true);
+    const mode = (path: string) => statSync(path).mode & 0o777;
+    expect([mode(join(work, "private")), mode(join(work, "private/nested")), mode(folder), mode(join(work, "private/exclusive")), mode(join(folder, "file"))]).toEqual([0o700, 0o700, 0o700, 0o700, 0o600]);
+
+    const loose = join(work, "loose");
+    mkdirSync(join(loose, "sub"), { recursive: true });
+    writeFileSync(join(loose, "sub/a.json"), "{}");
+    chmodSync(join(loose, "sub/a.json"), 0o644);
+    chmodSync(join(loose, "sub"), 0o755);
+    chmodSync(loose, 0o755);
+    const outside = join(work, "outside.txt");
+    writeFileSync(outside, "o");
+    chmodSync(outside, 0o644);
+    symlinkSync(outside, join(loose, "link"));
+    host.restrict(loose);
+    expect([mode(loose), mode(join(loose, "sub")), mode(join(loose, "sub/a.json")), mode(outside)]).toEqual([0o700, 0o700, 0o600, 0o644]);
+    host.restrict(join(work, "does-not-exist"));
+  });
+
+  test("the confirmation is answered by the host, and accepts when nothing is configured", () => {
+    expect(new BunHost().confirm("sure?", "Delete")).toBe(true);
+    const seen: string[] = [];
+    expect(new BunHost({ confirm: (message, action) => (seen.push(message, action), false) }).confirm("sure?", "Delete")).toBe(false);
+    expect(seen).toEqual(["sure?", "Delete"]);
+  });
+
+  test("a log line never carries the API key", () => {
+    const host = new BunHost({ env: { openrouter_api_key: "sk-or-v1-abcdef123456" }, onLog: () => {} });
+    host.log("request failed for sk-or-v1-abcdef123456 at once");
+    expect(host.logs).toEqual(["request failed for [redacted] at once"]);
   });
 
   test("fake commands stand in for macOS tools and fixture hooks feed the pickers", () => {
@@ -199,7 +234,7 @@ describe("file primitives", () => {
 
 describe("probe and replay", () => {
   test("the probe passes every check under the bun host", () => {
-    const host = new BunHost({ env: { ...process.env, TMPDIR: work }, trashDir: join(work, "ProbeTrash") });
+    const host = new BunHost({ env: { ...process.env, TMPDIR: work } });
     const result = JSON.parse(probe(host, []));
     const failed = result.checks.filter((c: { ok: boolean }) => !c.ok);
     expect(failed).toEqual([]);

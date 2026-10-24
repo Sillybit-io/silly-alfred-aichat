@@ -1,6 +1,9 @@
 #!/usr/bin/osascript -l JavaScript
 var __aichat_main;
 (() => {
+  // src/core/hooks.ts
+  var TEST_HOOKS = false;
+
   // src/core/capabilities.ts
   function isObject(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -72,9 +75,16 @@ var __aichat_main;
   }
 
   // src/core/payload.ts
+  function providerPreferences(mode) {
+    if (mode === "zdr")
+      return { data_collection: "deny", zdr: true };
+    if (mode === "deny")
+      return { data_collection: "deny" };
+    return null;
+  }
   var DEFAULT_API_BASE = "https://openrouter.ai/api/v1";
   function apiBase(env) {
-    const configured = (env.aichat_api_base ?? "").trim();
+    const configured = TEST_HOOKS ? (env.aichat_api_base ?? "").trim() : "";
     return (configured === "" ? DEFAULT_API_BASE : configured).replace(/\/+$/, "");
   }
   function chatUrl(env) {
@@ -163,6 +173,9 @@ var __aichat_main;
     const reasoning = reasoningFor(options);
     if (reasoning)
       body.reasoning = reasoning;
+    const provider = providerPreferences(options.privacy);
+    if (provider)
+      body.provider = provider;
     return body;
   }
   function encodeBody(body) {
@@ -212,6 +225,77 @@ ${text}` }
     if (stripped === "" || stripped.length > original.length * 3 + 200)
       return null;
     return stripped === original.trim() ? null : stripped;
+  }
+
+  // src/host/common.ts
+  var SUPERVISOR_SCRIPT = [
+    "umask 077",
+    "pid_file=$1; exit_file=$2; err_file=$3; remove_file=$4; shift 4",
+    "exec 3<&0",
+    '"$@" <&3 >/dev/null 2>"$err_file" &',
+    "child=$!",
+    "exec 3<&-",
+    'printf "%s" "$child" > "$pid_file.tmp" && mv "$pid_file.tmp" "$pid_file"',
+    'wait "$child"',
+    "status=$?",
+    '[ -n "$remove_file" ] && rm -f -- "$remove_file"',
+    'printf "%s" "$status" > "$exit_file.tmp" && mv "$exit_file.tmp" "$exit_file"'
+  ].join(`
+`);
+  function supervisorArgv(argv, files) {
+    if (argv.length === 0)
+      throw new Error("spawnSupervised needs a command");
+    return ["/bin/sh", "-c", SUPERVISOR_SCRIPT, "sh", files.pid, files.exit, files.stderr, files.remove ?? "", ...argv];
+  }
+  var SECRET_ENV = ["openrouter_api_key"];
+  function scrubbedEnv(env) {
+    const clean = {};
+    for (const [name, value] of Object.entries(env)) {
+      if (value !== undefined && SECRET_ENV.indexOf(name) < 0)
+        clean[name] = value;
+    }
+    return clean;
+  }
+  var CURL_STDIN_CONFIG = ["-K", "-"];
+  var BAD_KEY = /[\u0000-\u001f\u007f]/;
+  function keyProblem(apiKey) {
+    return BAD_KEY.test(apiKey) ? "The OpenRouter API key in the workflow's Configuration contains a line break or control character. Paste it again." : null;
+  }
+  function curlAuthConfig(apiKey) {
+    if (apiKey === "" || BAD_KEY.test(apiKey))
+      throw new Error("The API key cannot be sent.");
+    return `header = "Authorization: Bearer ${apiKey.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"
+`;
+  }
+  var CURL_PATH = "/usr/bin/curl";
+  function curlBinary(env) {
+    return TEST_HOOKS ? env.aichat_curl ?? CURL_PATH : CURL_PATH;
+  }
+  function curlProtocolArgs(url) {
+    const first = TEST_HOOKS && url.startsWith("http://") ? "=http,https" : "=https";
+    return ["--proto", first, "--proto-redir", "=https"];
+  }
+  function redact(message, env) {
+    let text = message;
+    for (const name of SECRET_ENV) {
+      const value = (env[name] ?? "").trim();
+      if (value.length >= 6)
+        text = text.split(value).join("[redacted]");
+    }
+    return text;
+  }
+  function psArgv(pid) {
+    return ["/bin/ps", "-ww", "-o", "command=", "-p", String(Math.trunc(pid))];
+  }
+  function commandFromPs(result) {
+    const text = result.stdout.trim();
+    return result.exit === 0 && text !== "" ? text : null;
+  }
+  function killArgv(pid) {
+    return ["/bin/kill", "-s", "TERM", String(Math.trunc(pid))];
+  }
+  function isSafePid(pid) {
+    return Number.isInteger(pid) && pid > 1;
   }
 
   // src/core/ids.ts
@@ -441,8 +525,8 @@ ${host.nowMs()}`);
     if (message !== null && POLICY_PATTERN.test(message) && (status.status === 404 || status.status === 403 || status.status === 400)) {
       return {
         title: "Blocked by your data policy",
-        detail: "Your OpenRouter privacy settings (such as zero data retention) leave no provider for this model.",
-        next: "Pick a model your settings allow with the `aimodels` keyword (add #imagegen for image models), or change the policy in your OpenRouter privacy settings."
+        detail: "The privacy rules in force (the workflow's Provider Privacy setting and your OpenRouter privacy settings) leave no provider for this model.",
+        next: "Pick a model they allow with the `aimodels` keyword (add #imagegen for image models), or loosen Provider Privacy in the workflow's Configuration or the policy in your OpenRouter privacy settings."
       };
     }
     switch (status.status) {
@@ -904,9 +988,6 @@ ${host.nowMs()}`);
     const rid = laneRecordId(host, lane);
     return rid === null ? null : loadRecord(host, rid);
   }
-  function curlPath(host) {
-    return host.env.aichat_curl ?? "/usr/bin/curl";
-  }
   function ownedPid(host, record) {
     const files = transport(host, record.id);
     const text = readOptional(host, files.pid);
@@ -926,12 +1007,12 @@ ${host.nowMs()}`);
     return ownedPid(host, record) === null && host.nowMs() - Math.max(record.lastGrowthAt, record.startedAt) > PID_GRACE_MS;
   }
   function curlArgs(host, input, files) {
-    const args = [curlPath(host), "-o", files.out, "-D", files.headers, "--silent", "--show-error", "--connect-timeout", "15"];
+    const args = [curlBinary(host.env), ...curlProtocolArgs(input.url), "-o", files.out, "-D", files.headers, "--silent", "--show-error", "--connect-timeout", "15"];
     if (input.stream)
       args.push("--no-buffer", "--speed-limit", "1", "--speed-time", String(input.timeoutSeconds));
     else
       args.push("--max-time", String(input.timeoutSeconds));
-    args.push("-H", "Content-Type: application/json", "-H", `Authorization: Bearer ${input.apiKey}`, "-H", `HTTP-Referer: ${REFERER}`, "-H", "X-Title: Alfred AI Chat", "--data-binary", `@${files.body}`, input.url);
+    args.push(...CURL_STDIN_CONFIG, "-H", "Content-Type: application/json", "-H", `HTTP-Referer: ${REFERER}`, "-H", "X-Title: Alfred AI Chat", "--data-binary", `@${files.body}`, input.url);
     return args;
   }
   function withLaneLock(host, lane, fn) {
@@ -939,6 +1020,7 @@ ${host.nowMs()}`);
     return withLock(host, laneLock(host, lane), fn);
   }
   function admit(host, input, finalizers = {}) {
+    const authConfig = curlAuthConfig(input.apiKey);
     return withLaneLock(host, input.lane, () => {
       const existing = laneRecordId(host, input.lane);
       if (existing !== null) {
@@ -996,7 +1078,7 @@ ${host.nowMs()}`);
             throw error;
         }
       }
-      host.spawnSupervised(curlArgs(host, input, files), { pid: files.pid, exit: files.exit, stderr: files.stderr });
+      host.spawnSupervised(curlArgs(host, input, files), { pid: files.pid, exit: files.exit, stderr: files.stderr, remove: files.body }, { stdin: authConfig });
       return { ok: true, rid };
     });
   }
@@ -1263,39 +1345,40 @@ ${host.nowMs()}`);
     return { text: null, failed: reason };
   }
   var SAME = { text: null, failed: null };
-  function standaloneMessage(host, apiKey, modelId, history, text) {
+  function standaloneMessage(host, apiKey, privacy, modelId, history, text) {
     if (history.length === 0 || text.trim() === "" || text.length > MAX_REWRITE_INPUT || modelId === "")
       return SAME;
     const folder = `${dataDir(host)}/web-query`;
     const bodyFile = `${folder}/${host.randomId()}.json`;
     try {
       host.mkdirp(folder);
-      host.writeAtomic(bodyFile, encodeBody({ ...buildBody(rewriteTurns(history, text), { modelId, model: null, stream: false, pdfEngine: "auto", web: false }), max_tokens: 200, temperature: 0 }));
+      host.writeAtomic(bodyFile, encodeBody({ ...buildBody(rewriteTurns(history, text), { modelId, model: null, stream: false, pdfEngine: "auto", web: false, privacy }), max_tokens: 200, temperature: 0 }));
+      const url = chatUrl(host.env);
       const run = host.runSync([
-        host.env.aichat_curl ?? "/usr/bin/curl",
+        curlBinary(host.env),
+        ...curlProtocolArgs(url),
         "--silent",
         "--connect-timeout",
         "5",
         "--max-time",
         String(TIMEOUT_SECONDS),
+        ...CURL_STDIN_CONFIG,
         "-H",
         "Content-Type: application/json",
-        "-H",
-        `Authorization: Bearer ${apiKey}`,
         "-H",
         `HTTP-Referer: ${REFERER}`,
         "-H",
         "X-Title: Alfred AI Chat",
         "--data-binary",
         `@${bodyFile}`,
-        chatUrl(host.env)
-      ], { timeoutMs: (TIMEOUT_SECONDS + 2) * 1000 });
+        url
+      ], { timeoutMs: (TIMEOUT_SECONDS + 2) * 1000, stdin: curlAuthConfig(apiKey) });
       if (run.exit !== 0)
         return fail(host, run.exit === 124 ? "timed out" : `curl exit ${run.exit}`);
       const parsed = JSON.parse(run.stdout);
       const content = parsed.choices?.[0]?.message?.content;
       if (typeof content !== "string")
-        return fail(host, typeof parsed.error?.message === "string" ? parsed.error.message : "no reply");
+        return fail(host, typeof parsed.error?.message === "string" ? "the provider returned an error" : "no reply");
       return { text: cleanRewrite(content, text), failed: null };
     } catch {
       return fail(host, "unreadable reply");
@@ -1330,60 +1413,6 @@ ${host.nowMs()}`);
     return [parts.base.trim(), parts.context ?? "", parts.web ? WEB_LINE : ""].filter((part) => part !== "").join(`
 
 `);
-  }
-
-  // src/core/favicons.ts
-  function domainOf(url) {
-    const match = /^https?:\/\/([^/:?#\s]+)/i.exec(url.trim());
-    if (!match)
-      return null;
-    const host = match[1].toLowerCase().replace(/^www\./, "").replace(/\.$/, "");
-    return isSafeDomain(host) ? host : null;
-  }
-  function isSafeDomain(host) {
-    if (host.length < 4 || host.length > 253)
-      return false;
-    if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(host))
-      return false;
-    if (/^\d+(\.\d+)*$/.test(host) || /^[0-9]+$/.test(host.slice(host.lastIndexOf(".") + 1)))
-      return false;
-    const last = host.slice(host.lastIndexOf(".") + 1);
-    if (["local", "localhost", "internal", "lan", "home", "corp", "intranet", "test", "invalid", "example"].indexOf(last) >= 0)
-      return false;
-    return true;
-  }
-  var MAX_ICON_BYTES = 64 * 1024;
-  function startsWith(bytes, signature) {
-    return bytes.length >= signature.length && signature.every((value, i) => bytes[i] === value);
-  }
-  function isRasterIcon(bytes) {
-    if (bytes.length === 0 || bytes.length > MAX_ICON_BYTES)
-      return false;
-    return startsWith(bytes, [137, 80, 78, 71, 13, 10, 26, 10]) || startsWith(bytes, [0, 0, 1, 0]) || startsWith(bytes, [71, 73, 70, 56]) || startsWith(bytes, [255, 216, 255]);
-  }
-  function labelOf(url) {
-    const domain = domainOf(url);
-    const host = domain ?? (/^https?:\/\/([^/?#]+)/i.exec(url)?.[1] ?? "link");
-    return host.replace(/([\\_*`\[\]])/g, "\\$1");
-  }
-  function sourcesRow(sources, style) {
-    const seen = new Set;
-    const unique = sources.filter((source) => {
-      const key = labelOf(source.url);
-      if (seen.has(key))
-        return false;
-      seen.add(key);
-      return true;
-    });
-    const shown = unique.slice(0, style.cap);
-    const links = shown.map((source) => {
-      const domain = domainOf(source.url);
-      const icon = style.icons && domain !== null ? style.icon(domain) : null;
-      const link = `[${labelOf(source.url)}](${source.url.replace(/\s/g, "%20").replace(/\(/g, "%28").replace(/\)/g, "%29")})`;
-      return icon === null ? link : `![](${icon}) ${link}`;
-    });
-    const more = unique.length > shown.length ? `  ·  +${unique.length - shown.length} more with \`/sources\`` : "";
-    return `**Sources**  ${links.join("  ·  ")}${more}`;
   }
 
   // src/core/tables.ts
@@ -1430,6 +1459,430 @@ ${host.nowMs()}`);
 `);
   }
 
+  // src/core/sanitize.ts
+  var MAX_URL = 2000;
+  var MAX_SHOWN_URL = 500;
+  var MAX_DEPTH = 4;
+  var SLOT_OPEN = "";
+  var SLOT_CLOSE = "";
+  var TRACKING_PARAM = /^(utm_[a-z0-9_]*|fbclid|gclid|dclid|gbraid|wbraid|msclkid|yclid|twclid|igshid|mc_cid|mc_eid|_hsenc|_hsmi|mkt_tok|vero_id|ref_src|ref_url|s_cid|oly_enc_id|oly_anon_id|spm|ck_subscriber_id)$/i;
+  function safeUrl(raw) {
+    const url = raw.trim();
+    if (url === "" || url.length > MAX_URL)
+      return null;
+    if (/[\s\u0000-\u001f\u007f-\u009f<>"`\\]/.test(url))
+      return null;
+    const match = /^https:\/\/([^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$/i.exec(url);
+    if (!match)
+      return null;
+    const authority = match[1];
+    if (!/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.(?:[a-z]{2,}|xn--[a-z0-9-]+)(:\d{1,5})?$/i.test(authority))
+      return null;
+    const query = (match[3] ?? "").slice(1).split("&").filter((pair) => pair !== "" && !TRACKING_PARAM.test(pair.split("=")[0])).join("&");
+    return `https://${authority.toLowerCase()}${match[2]}${query === "" ? "" : `?${query}`}${match[4] ?? ""}`;
+  }
+  function hostOf(url) {
+    const match = /^https:\/\/([^/?#:]+)/i.exec(url);
+    return match ? match[1].toLowerCase().replace(/^www\./, "") : "";
+  }
+  function escapeMarkdown(text, max = 200) {
+    const flat = text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").replace(/\s+/g, " ").trim();
+    const cut = flat.length > max ? `${flat.slice(0, max)}…` : flat;
+    return cut.replace(/[\\`*_{}[\]()<>!|~&#+]/g, "\\$&");
+  }
+  function encodeDest(url) {
+    return url.replace(/\(/g, "%28").replace(/\)/g, "%29").replace(/\[/g, "%5B").replace(/\]/g, "%5D");
+  }
+  function shownCode(dest) {
+    const flat = dest.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").trim().replace(/%/g, "%25").replace(/\s/g, "%20").replace(/`/g, "%60").replace(/\[/g, "%5B").replace(/\]/g, "%5D").replace(/</g, "%3C").replace(/>/g, "%3E");
+    if (flat === "")
+      return "`(empty)`";
+    return `\`${flat.length > MAX_SHOWN_URL ? `${flat.slice(0, MAX_SHOWN_URL)}…` : flat}\``;
+  }
+  var PUNCTUATION = /[!-/:-@[-`{-~]/;
+  function isBlankAfter(s, newline) {
+    let k = newline + 1;
+    while (s[k] === " " || s[k] === "\t")
+      k++;
+    return s[k] === `
+`;
+  }
+  function codeSpanEnd(s, start) {
+    let n = 0;
+    while (s[start + n] === "`")
+      n++;
+    let j = start + n;
+    while (j < s.length && s[j] !== `
+`) {
+      if (s[j] === "`") {
+        let m = 0;
+        while (s[j + m] === "`")
+          m++;
+        if (m === n)
+          return j + m;
+        j += m;
+      } else {
+        j++;
+      }
+    }
+    return -1;
+  }
+  function matchClose(s, open, up, down) {
+    let depth = 0;
+    for (let j = open;j < s.length; j++) {
+      const c = s[j];
+      if (c === "\\") {
+        j++;
+      } else if (c === "`") {
+        const end = codeSpanEnd(s, j);
+        if (end > 0)
+          j = end - 1;
+        else
+          while (s[j + 1] === "`")
+            j++;
+      } else if (c === up) {
+        depth++;
+      } else if (c === down) {
+        depth--;
+        if (depth === 0)
+          return j;
+      } else if (c === `
+` && isBlankAfter(s, j)) {
+        return -1;
+      }
+    }
+    return -1;
+  }
+  var normalizeLabel = (label) => label.replace(/\\(.)/g, "$1").trim().replace(/\s+/g, " ").toLowerCase();
+  function isLocalImage(dest, roots) {
+    if (/[\u0000-\u001f<>`"\\[\]?#]/.test(dest) || dest.indexOf("://") >= 0 || dest.split("/").indexOf("..") >= 0)
+      return false;
+    return roots.some((root) => root.startsWith("/") && dest.startsWith(`${root}/`) && dest.length > root.length + 1);
+  }
+  function destinationOf(raw) {
+    const text = raw.trim();
+    const angle = /^<([^<>\n]*)>/.exec(text);
+    if (angle)
+      return angle[1];
+    const titled = /^(\S+)\s+(?:"[^"]*"|'[^']*'|\([^)]*\))$/.exec(text);
+    return titled ? titled[1] : text;
+  }
+  function bracketed(s, i, image, ctx, depth) {
+    const open = image ? i + 1 : i;
+    const close = matchClose(s, open, "[", "]");
+    if (close < 0)
+      return null;
+    const label = s.slice(open + 1, close);
+    let dest;
+    let end;
+    if (s[close + 1] === "(") {
+      const paren = matchClose(s, close + 1, "(", ")");
+      if (paren < 0)
+        return null;
+      dest = destinationOf(s.slice(close + 2, paren));
+      end = paren + 1;
+    } else {
+      let key = label;
+      end = close + 1;
+      if (s[close + 1] === "[") {
+        const second = matchClose(s, close + 1, "[", "]");
+        if (second > 0) {
+          const inner = s.slice(close + 2, second);
+          key = inner.trim() === "" ? label : inner;
+          end = second + 1;
+        }
+      }
+      const found = ctx.defs.get(normalizeLabel(key));
+      if (found === undefined)
+        return null;
+      dest = found;
+    }
+    if (image) {
+      if (isLocalImage(dest, ctx.roots)) {
+        ctx.slots.push(`![](${dest})`);
+        return { out: `${SLOT_OPEN}${ctx.slots.length - 1}${SLOT_CLOSE}`, end };
+      }
+      return { out: `\uD83D\uDDBC image not loaded: ${shownCode(dest)}${s[end] === "`" ? " " : ""}`, end };
+    }
+    const shown = scan(label, ctx, depth + 1);
+    const url = safeUrl(dest);
+    if (url === null)
+      return { out: `${shown} (${shownCode(dest)})`, end };
+    const host = hostOf(url);
+    const named = shown.toLowerCase().indexOf(host) >= 0 || s.startsWith(` (${host})`, end);
+    return { out: `[${shown}](${encodeDest(url)})${named ? "" : ` (${host})`}`, end };
+  }
+  function scan(s, ctx, depth) {
+    if (depth > MAX_DEPTH)
+      return s.replace(/[\\![\]<`]/g, "\\$&");
+    let out = "";
+    let i = 0;
+    while (i < s.length) {
+      const c = s[i];
+      if (c === "\\") {
+        const next = s[i + 1];
+        if (next !== undefined && PUNCTUATION.test(next)) {
+          out += c + next;
+          i += 2;
+        } else {
+          out += c;
+          i++;
+        }
+      } else if (c === "`") {
+        const end = codeSpanEnd(s, i);
+        if (end > 0) {
+          out += s.slice(i, end);
+          i = end;
+        } else {
+          let n = 0;
+          while (s[i + n] === "`")
+            n++;
+          out += s.slice(i, i + n);
+          i += n;
+        }
+      } else if (c === "<") {
+        const auto = /^<(https:\/\/[^\s<>`\\]+)>/i.exec(s.slice(i, i + MAX_URL + 10));
+        const url = auto ? safeUrl(auto[1]) : null;
+        if (auto && url !== null) {
+          out += `<${url}>`;
+          i += auto[0].length;
+        } else {
+          out += s[i + 1] !== undefined && /[A-Za-z/!?]/.test(s[i + 1]) ? "\\<" : "<";
+          i++;
+        }
+      } else if (c === "!" && s[i + 1] === "[") {
+        const found = bracketed(s, i, true, ctx, depth);
+        if (found) {
+          out += found.out;
+          i = found.end;
+        } else {
+          out += "\\!";
+          i++;
+        }
+      } else if (c === "[") {
+        const found = bracketed(s, i, false, ctx, depth);
+        if (found) {
+          out += found.out;
+          i = found.end;
+        } else {
+          out += c;
+          i++;
+        }
+      } else {
+        out += c;
+        i++;
+      }
+    }
+    return out;
+  }
+  var AMBIGUOUS_FENCE = /^[ \t>+*\-\d.)]+(`{3,}|~{3,})/;
+  function leadingColumns(line) {
+    let columns = 0;
+    for (const c of line) {
+      if (c === " ")
+        columns++;
+      else if (c === "\t")
+        columns += 4 - columns % 4;
+      else
+        break;
+    }
+    return columns;
+  }
+  var DEFINITION_START = /^((?:[ \t]|>|[-+*]|\d{1,9}[.)])*)\[((?:[^\]\\\n]|\\.)*)\]:/;
+  var DEFINITION_REST = /^[ \t]*(?:<([^<>\n]*)>|(\S+))[ \t]*(?:"[^"]*"|'[^']*'|\([^)]*\))?[ \t]*$/;
+  function net(chunk) {
+    let out = "";
+    let i = 0;
+    while (i < chunk.length) {
+      const c = chunk[i];
+      if (c === "\\") {
+        out += c + (chunk[i + 1] ?? "");
+        i += 2;
+      } else if (c === "`") {
+        const end = codeSpanEnd(chunk, i);
+        if (end > 0) {
+          out += chunk.slice(i, end).replace(/(^|[^\\])!\[/g, "$1\\![");
+          i = end;
+        } else {
+          let n = 0;
+          while (chunk[i + n] === "`")
+            n++;
+          out += chunk.slice(i, i + n);
+          i += n;
+        }
+      } else if (c === "<") {
+        const auto = /^<(https:\/\/[^\s<>`\\]+)>/i.exec(chunk.slice(i, i + MAX_URL + 10));
+        if (auto && safeUrl(auto[1]) === auto[1]) {
+          out += auto[0];
+          i += auto[0].length;
+        } else {
+          out += chunk[i + 1] !== undefined && /[A-Za-z/!?]/.test(chunk[i + 1]) ? "\\<" : "<";
+          i++;
+        }
+      } else if (c === "!" && chunk[i + 1] === "[") {
+        out += "\\!";
+        i++;
+      } else {
+        out += c;
+        i++;
+      }
+    }
+    return out.split(`
+`).map((line) => {
+      const start = DEFINITION_START.exec(line);
+      return start && !start[2].startsWith("^") ? `${start[1]}\\${line.slice(start[1].length)}` : line;
+    }).join(`
+`);
+  }
+  function settle(text, ctx) {
+    let current = text;
+    for (let pass = 0;pass < 4; pass++) {
+      const next = net(scan(current, ctx, 0));
+      if (next === current)
+        return current;
+      current = next;
+    }
+    return current.replace(/[\\![\]<`]/g, "\\$&");
+  }
+  function fenceAfter(text, start, listAware) {
+    let fence = start;
+    for (const line of text.split(`
+`)) {
+      if (fence !== null) {
+        const closing = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+        if (closing && closing[1][0] === fence.char && closing[1].length >= fence.size) {
+          fence = null;
+          continue;
+        }
+        if (!listAware || line.trim() === "" || leadingColumns(line) >= fence.indent)
+          continue;
+        fence = null;
+      }
+      const opening = /^( {0,3})(`{3,}|~{3,})(.*)$/.exec(line);
+      if (opening && !(opening[2][0] === "`" && opening[3].indexOf("`") >= 0))
+        fence = { char: opening[2][0], size: opening[2].length, indent: opening[1].length };
+    }
+    return fence;
+  }
+  function sanitizeMarkdown(input, options = {}) {
+    for (const mode of ["normal", "no code", "no fences"]) {
+      const result = sanitizeWith(input, options, mode);
+      if (result !== null)
+        return result;
+    }
+    throw new Error("unreachable");
+  }
+  function sanitizeWith(input, options, mode) {
+    const trustNoCode = mode !== "normal";
+    const lines = input.replace(/[\uE000\uE001]/g, "").replace(/\r\n?/g, `
+`).split(`
+`);
+    const ctx = { defs: new Map, roots: (options.imageRoots ?? []).map((root) => root.replace(/\/+$/, "")), slots: [] };
+    const code = [];
+    let fence = null;
+    let indented = null;
+    let strict = trustNoCode;
+    for (let n = 0;n < lines.length; n++) {
+      const line = lines[n];
+      if (strict) {
+        code.push(false);
+      } else if (fence !== null) {
+        code.push(true);
+        const closing = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+        if (closing && closing[1][0] === fence.char && closing[1].length >= fence.size)
+          fence = null;
+        continue;
+      } else if (indented !== null) {
+        const closing = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+        if (closing && closing[1][0] === indented.char && closing[1].length >= indented.size) {
+          indented = null;
+          code.push(true);
+          continue;
+        }
+        if (line.trim() === "" || leadingColumns(line) >= indented.columns) {
+          code.push(true);
+          continue;
+        }
+        indented = null;
+        strict = true;
+        code.push(false);
+      } else {
+        const shallow = /^( {1,3})(`{3,}|~{3,})(.*)$/.exec(line);
+        const opening = /^(`{3,}|~{3,})(.*)$/.exec(line);
+        if (shallow && !(shallow[2][0] === "`" && shallow[3].indexOf("`") >= 0)) {
+          indented = { char: shallow[2][0], size: shallow[2].length, columns: shallow[1].length };
+          code.push(true);
+          continue;
+        }
+        if (opening && !(opening[1][0] === "`" && opening[2].indexOf("`") >= 0)) {
+          fence = { char: opening[1][0], size: opening[1].length };
+          code.push(true);
+          continue;
+        }
+        if (AMBIGUOUS_FENCE.test(line))
+          strict = true;
+        code.push(false);
+      }
+      const start = DEFINITION_START.exec(line);
+      if (start && !start[2].startsWith("^")) {
+        const rest = DEFINITION_REST.exec(line.slice(start[0].length));
+        if (rest) {
+          const key = normalizeLabel(start[2]);
+          if (!ctx.defs.has(key))
+            ctx.defs.set(key, rest[1] ?? rest[2] ?? "");
+          lines[n] = start[1].replace(/[ \t]+$/, "");
+        } else {
+          lines[n] = `${start[1]}\\${line.slice(start[1].length)}`;
+        }
+      }
+    }
+    const segments = [];
+    for (let n = 0;n < lines.length; n++) {
+      const last = segments[segments.length - 1];
+      if (last && last.code === code[n])
+        last.text += `
+${lines[n]}`;
+      else
+        segments.push({ code: code[n], text: lines[n] });
+    }
+    if (mode === "no fences")
+      return finish(segments.map((segment) => unfenced(segment.text, ctx)).join(`
+`), ctx);
+    const pieces = segments.map((segment) => segment.code ? segment.text : settle(segment.text, ctx));
+    let flat = null;
+    let nested = null;
+    for (let k = 0;k < segments.length; k++) {
+      if (segments[k].code && (flat !== null || nested !== null))
+        return null;
+      flat = fenceAfter(pieces[k], flat, false);
+      nested = fenceAfter(pieces[k], nested, true);
+    }
+    let out = pieces.join(`
+`);
+    if (flat !== null || nested !== null) {
+      if (flat === null || nested === null || flat.char !== nested.char || flat.size !== nested.size)
+        return null;
+      out += `
+${flat.char.repeat(flat.size)}`;
+      if (fenceAfter(out, null, false) !== null || fenceAfter(out, null, true) !== null)
+        return null;
+    }
+    return finish(out, ctx);
+  }
+  var escapeFences = (text) => text.replace(/^( {0,3})(`{3,}|~{3,})/gm, "$1\\$2");
+  function unfenced(text, ctx) {
+    let current = text;
+    for (let round = 0;round < 4; round++) {
+      current = settle(escapeFences(current), ctx);
+      if (escapeFences(current) === current)
+        return current;
+    }
+    return escapeFences(current).replace(/[\\![\]<`]/g, "\\$&");
+  }
+  function finish(out, ctx) {
+    return out.replace(new RegExp(`${SLOT_OPEN}(\\d+)${SLOT_CLOSE}`, "g"), (_all, index) => ctx.slots[Number(index)] ?? "");
+  }
+
   // src/core/transcript.ts
   var YOU_HEADING = "# \uD83E\uDDD1 You";
   var ASSISTANT_HEADING = "# \uD83E\uDD16 Assistant";
@@ -1448,20 +1901,40 @@ ${host.nowMs()}`);
       if (annotation.type !== "url_citation")
         continue;
       const inner = typeof annotation.url_citation === "object" && annotation.url_citation !== null ? annotation.url_citation : annotation;
-      const url = typeof inner.url === "string" ? inner.url : "";
-      if (url === "" || seen.has(url))
+      const url = typeof inner.url === "string" ? safeUrl(inner.url) : null;
+      if (url === null || seen.has(url))
         continue;
       seen.add(url);
-      sources.push({ url, title: typeof inner.title === "string" && inner.title !== "" ? inner.title : url });
+      sources.push({ url, title: typeof inner.title === "string" && inner.title.trim() !== "" ? inner.title : url });
     }
     return sources;
+  }
+  function encodeParens(url) {
+    return url.replace(/\(/g, "%28").replace(/\)/g, "%29").replace(/\[/g, "%5B").replace(/\]/g, "%5D");
+  }
+  function sourceLine(source) {
+    return `[${escapeMarkdown(source.title)}](${encodeParens(source.url)})`;
+  }
+  function sourcesRow(sources, cap) {
+    const seen = new Set;
+    const unique = sources.filter((source) => {
+      const host = hostOf(source.url);
+      if (seen.has(host))
+        return false;
+      seen.add(host);
+      return true;
+    });
+    const shown = unique.slice(0, cap);
+    const links = shown.map((source) => `[${escapeMarkdown(hostOf(source.url))}](${encodeParens(source.url)})`);
+    const more = unique.length > shown.length ? `  ·  +${unique.length - shown.length} more with \`/sources\`` : "";
+    return `**Sources**  ${links.join("  ·  ")}${more}`;
   }
   function quote(text) {
     return text.split(`
 `).map((line) => line === "" ? ">" : `> ${line}`).join(`
 `);
   }
-  function renderMessage(message, style) {
+  function renderMessage(message, options = {}) {
     const parts = [message.role === "user" ? YOU_HEADING : ASSISTANT_HEADING];
     if (message.reasoning)
       parts.push(quote(message.reasoning.trim()));
@@ -1471,7 +1944,7 @@ ${host.nowMs()}`);
       parts.push(`\uD83D\uDCCE ${attachment.name} (${formatSize(attachment.size)})`);
     const sources = sourcesOf(message);
     if (sources.length > 0) {
-      parts.push(style ? sourcesRow(sources, style) : ["**Sources**", ...sources.map((source) => `- [${source.title}](${source.url})`)].join(`
+      parts.push(options.sourcesRowCap !== undefined ? sourcesRow(sources, options.sourcesRowCap) : ["**Sources**", ...sources.map((source) => `- ${sourceLine(source)}`)].join(`
 `));
     }
     if (message.status === "interrupted")
@@ -1482,10 +1955,10 @@ ${host.nowMs()}`);
 
 `);
   }
-  function renderTranscript(chat, style) {
+  function renderTranscript(chat, options = {}) {
     return chat.messages.map((message, i) => `${message.role === "user" && i > 0 ? `${TURN_BREAK}
 
-` : ""}${renderMessage(message, style)}`).join(`
+` : ""}${renderMessage(message, options)}`).join(`
 
 `);
   }
@@ -1832,12 +2305,11 @@ ${host.nowMs()}`);
   });
   var failedAt = (host) => `${transportDir(host)}/failed-at`;
   var startedAt = (host) => `${transportDir(host)}/started-at`;
-  function curl(host) {
-    return host.env.aichat_curl ?? "/usr/bin/curl";
-  }
   function curlArgs2(host, extra) {
+    const url = `${apiBase(host.env)}/models?output_modalities=all`;
     return [
-      curl(host),
+      curlBinary(host.env),
+      ...curlProtocolArgs(url),
       "-o",
       part(host),
       "-D",
@@ -1847,7 +2319,7 @@ ${host.nowMs()}`);
       "--connect-timeout",
       "10",
       ...extra,
-      `${apiBase(host.env)}/models?output_modalities=all`
+      url
     ];
   }
   function loadCatalog(host) {
@@ -2350,148 +2822,6 @@ ${decodeUtf8(bytes)}
     return cleaned === "" ? "Chat" : cleaned;
   }
 
-  // src/features/history.ts
-  var DEFAULT_TITLE = "New chat";
-  var MAX_TITLE_ATTEMPTS_MESSAGES = 4;
-  function clip3(text, length) {
-    return text.length > length ? `${text.slice(0, length)}…` : text;
-  }
-  function expandHome(host, path) {
-    const home = host.env.HOME ?? "";
-    return path === "~" ? home : path.startsWith("~/") ? `${home}${path.slice(1)}` : path;
-  }
-  function displayTitle(chat) {
-    if (chat.title !== DEFAULT_TITLE)
-      return chat.title;
-    const first = chat.messages.find((message) => message.role === "user")?.content ?? chat.retry?.text ?? "";
-    const flat = first.replace(/\s+/g, " ").trim();
-    return flat === "" ? DEFAULT_TITLE : clip3(flat, 60);
-  }
-  function requestTitle(host, config, chatId) {
-    const chat = getChat(host, chatId);
-    if (!chat || chat.titleSource !== "auto" || chat.title !== DEFAULT_TITLE || chat.messages.length === 0 || chat.messages.length > MAX_TITLE_ATTEMPTS_MESSAGES)
-      return;
-    const user = chat.messages.find((message) => message.role === "user");
-    const assistant = chat.messages.find((message) => message.role === "assistant");
-    if (!user || config.apiKey === "")
-      return;
-    const modelId = config.titleModel !== "" ? config.titleModel : config.defaultModel;
-    const body = encodeBody(buildBody([
-      { role: "system", content: TITLE_PROMPT },
-      { role: "user", content: `User: ${clip3(user.content, 600)}
-
-Assistant: ${clip3(assistant?.content ?? "", 600)}` }
-    ], { modelId, model: null, stream: false, pdfEngine: "auto", web: false }));
-    admit(host, {
-      lane: `title:${chatId}`,
-      kind: "title",
-      chatId,
-      model: modelId,
-      draft: { text: "", attachments: [] },
-      body,
-      url: chatUrl(host.env),
-      apiKey: config.apiKey,
-      stream: false,
-      timeoutSeconds: 30
-    });
-  }
-  function afterCommit(ctx) {
-    if (!ctx.config.autoTitles || ctx.record.chatId === null)
-      return;
-    requestTitle(ctx.host, ctx.config, ctx.record.chatId);
-  }
-  var titleFinalizer = (host, record, outcome) => {
-    if (outcome.state !== "done" || record.chatId === null)
-      return;
-    let reply = "";
-    try {
-      const parsed = JSON.parse(outcome.bodyText);
-      const content = parsed.choices?.[0]?.message?.content;
-      reply = typeof content === "string" ? content : "";
-    } catch {
-      return;
-    }
-    const title = cleanTitle(reply);
-    if (title === "")
-      return;
-    try {
-      setTitleIfAuto(host, record.chatId, title);
-    } catch (error) {
-      if (!(error instanceof NotFoundError))
-        throw error;
-    }
-  };
-  function exportChat(host, config, chat) {
-    const folder = expandHome(host, config.exportFolder);
-    host.mkdirp(folder);
-    const title = displayTitle(chat);
-    const date = new Date(host.nowMs()).toISOString().slice(0, 10);
-    const visible = chat.settings.showReasoning ? chat : { ...chat, messages: chat.messages.map(({ reasoning: _hidden, ...rest }) => rest) };
-    const text = `# ${title}
-
-_Exported ${date}${chat.model ? ` · ${chat.model}` : ""}_
-
-${renderTranscript(visible)}
-`;
-    const base = `${folder}/${date} ${fileSafe(title)}`;
-    let path = `${base}.md`;
-    for (let n = 2;host.exists(path); n++)
-      path = `${base} ${n}.md`;
-    host.writeAtomic(path, text);
-    return path;
-  }
-  var exportCommand = {
-    usage: "/export",
-    help: "Save this chat as a Markdown file in the export folder",
-    run(ctx) {
-      if (!ctx.chat || ctx.chat.messages.length === 0)
-        return { kind: "notice", text: "There is nothing to export yet." };
-      try {
-        const path = exportChat(ctx.host, ctx.config, ctx.chat);
-        return { kind: "notice", text: `Exported to \`${path.replace(ctx.host.env.HOME ?? "\x00", "~")}\`.` };
-      } catch (error) {
-        return { kind: "notice", text: `The export failed: ${String(error)}. Check the export folder in Configuration.` };
-      }
-    }
-  };
-  var title = {
-    usage: "/title <text>",
-    help: "Name this chat yourself; automatic titles never replace it",
-    run(ctx, args) {
-      if (args === "")
-        return { kind: "notice", text: `Title: **${ctx.chat ? displayTitle(ctx.chat) : DEFAULT_TITLE}**. Use \`/title <text>\` to rename it.` };
-      const chat = ctx.ensureChat();
-      setTitleManual(ctx.host, chat.id, args.slice(0, 120));
-      return { kind: "notice", text: `Title set to **${args.slice(0, 120)}**.` };
-    }
-  };
-  function toggle(field, on, off) {
-    return (ctx) => {
-      const chat = ctx.ensureChat();
-      let value = false;
-      mutateChat(ctx.host, chat.id, (current) => {
-        current[field] = !current[field];
-        value = current[field];
-      });
-      return { kind: "notice", text: value ? on : off };
-    };
-  }
-  var pin = {
-    usage: "/pin",
-    help: "Pin or unpin this chat so it stays at the top and is never pruned",
-    run: toggle("pinned", "Pinned. It stays at the top of the history and is never pruned.", "Unpinned.")
-  };
-  var archive = {
-    usage: "/archive",
-    help: "Archive or restore this chat",
-    run: toggle("archived", "Archived. Find it with `archived` in the history list.", "Restored from the archive.")
-  };
-  var feature3 = {
-    commands: { export: exportCommand, title, pin, archive },
-    afterCommit,
-    finalizers: { title: titleFinalizer }
-  };
-
   // src/core/imagegen.ts
   var RESOLUTIONS = ["512", "768", "1K", "1.5K", "2K", "4K"];
   var MAX_IMAGES = 10;
@@ -2549,20 +2879,20 @@ ${renderTranscript(visible)}
     "image/webp": "webp",
     "image/svg+xml": "svg"
   };
-  function startsWith2(bytes, signature, offset = 0) {
+  function startsWith(bytes, signature, offset = 0) {
     return signature.every((value, i) => bytes[offset + i] === value);
   }
   function imageExtension(mediaType, bytes) {
     const fromType = mediaType ? MEDIA_EXTENSIONS[mediaType.toLowerCase().split(";")[0].trim()] : undefined;
     if (fromType)
       return fromType;
-    if (startsWith2(bytes, [137, 80, 78, 71]))
+    if (startsWith(bytes, [137, 80, 78, 71]))
       return "png";
-    if (startsWith2(bytes, [255, 216, 255]))
+    if (startsWith(bytes, [255, 216, 255]))
       return "jpg";
-    if (startsWith2(bytes, [71, 73, 70, 56]))
+    if (startsWith(bytes, [71, 73, 70, 56]))
       return "gif";
-    if (startsWith2(bytes, [82, 73, 70, 70]) && startsWith2(bytes, [87, 69, 66, 80], 8))
+    if (startsWith(bytes, [82, 73, 70, 70]) && startsWith(bytes, [87, 69, 66, 80], 8))
       return "webp";
     let head = "";
     for (let i = 0;i < Math.min(bytes.length, 256); i++)
@@ -2634,9 +2964,11 @@ ${renderTranscript(visible)}
         host.writeAtomic(temp, image.bytes);
         host.move(temp, `${folder}/${name}`);
         saved.push(`${folder}/${name}`);
-        try {
-          host.runSync(["/usr/bin/xattr", "-w", XATTR_FIELD, xattrPlist(prompt), `${folder}/${name}`], { timeoutMs: 1e4 });
-        } catch {}
+        if (config.savePrompts) {
+          try {
+            host.runSync(["/usr/bin/xattr", "-w", XATTR_FIELD, xattrPlist(prompt), `${folder}/${name}`], { timeoutMs: 1e4 });
+          } catch {}
+        }
       }
     } catch (error) {
       for (const path of saved)
@@ -2660,6 +2992,148 @@ ${renderTranscript(visible)}
     }
     return best ? best.path : null;
   }
+
+  // src/features/history.ts
+  var DEFAULT_TITLE = "New chat";
+  var MAX_TITLE_ATTEMPTS_MESSAGES = 4;
+  function clip3(text, length) {
+    return text.length > length ? `${text.slice(0, length)}…` : text;
+  }
+  function expandHome(host, path) {
+    const home = host.env.HOME ?? "";
+    return path === "~" ? home : path.startsWith("~/") ? `${home}${path.slice(1)}` : path;
+  }
+  function displayTitle(chat) {
+    if (chat.title !== DEFAULT_TITLE)
+      return chat.title;
+    const first = chat.messages.find((message) => message.role === "user")?.content ?? chat.retry?.text ?? "";
+    const flat = first.replace(/\s+/g, " ").trim();
+    return flat === "" ? DEFAULT_TITLE : clip3(flat, 60);
+  }
+  function requestTitle(host, config, chatId) {
+    const chat = getChat(host, chatId);
+    if (!chat || chat.titleSource !== "auto" || chat.title !== DEFAULT_TITLE || chat.messages.length === 0 || chat.messages.length > MAX_TITLE_ATTEMPTS_MESSAGES)
+      return;
+    const user = chat.messages.find((message) => message.role === "user");
+    const assistant = chat.messages.find((message) => message.role === "assistant");
+    if (!user || config.apiKey === "")
+      return;
+    const modelId = config.titleModel !== "" ? config.titleModel : config.defaultModel;
+    const body = encodeBody(buildBody([
+      { role: "system", content: TITLE_PROMPT },
+      { role: "user", content: `User: ${clip3(user.content, 600)}
+
+Assistant: ${clip3(assistant?.content ?? "", 600)}` }
+    ], { modelId, model: null, stream: false, pdfEngine: "auto", web: false, privacy: config.privacy }));
+    admit(host, {
+      lane: `title:${chatId}`,
+      kind: "title",
+      chatId,
+      model: modelId,
+      draft: { text: "", attachments: [] },
+      body,
+      url: chatUrl(host.env),
+      apiKey: config.apiKey,
+      stream: false,
+      timeoutSeconds: 30
+    });
+  }
+  function afterCommit(ctx) {
+    if (!ctx.config.autoTitles || ctx.record.chatId === null)
+      return;
+    requestTitle(ctx.host, ctx.config, ctx.record.chatId);
+  }
+  var titleFinalizer = (host, record, outcome) => {
+    if (outcome.state !== "done" || record.chatId === null)
+      return;
+    let reply = "";
+    try {
+      const parsed = JSON.parse(outcome.bodyText);
+      const content = parsed.choices?.[0]?.message?.content;
+      reply = typeof content === "string" ? content : "";
+    } catch {
+      return;
+    }
+    const title = cleanTitle(reply);
+    if (title === "")
+      return;
+    try {
+      setTitleIfAuto(host, record.chatId, title);
+    } catch (error) {
+      if (!(error instanceof NotFoundError))
+        throw error;
+    }
+  };
+  function exportChat(host, config, chat) {
+    const folder = expandHome(host, config.exportFolder);
+    host.mkdirp(folder);
+    const title = displayTitle(chat);
+    const date = new Date(host.nowMs()).toISOString().slice(0, 10);
+    const visible = chat.settings.showReasoning ? chat : { ...chat, messages: chat.messages.map(({ reasoning: _hidden, ...rest }) => rest) };
+    const text = `${sanitizeMarkdown(`# ${title}
+
+_Exported ${date}${chat.model ? ` · ${chat.model}` : ""}_
+
+${renderTranscript(visible)}`, { imageRoots: [imagesFolder(host, config)] })}
+`;
+    const base = `${folder}/${date} ${fileSafe(title)}`;
+    let path = `${base}.md`;
+    for (let n = 2;host.exists(path); n++)
+      path = `${base} ${n}.md`;
+    host.writeAtomic(path, text);
+    return path;
+  }
+  var exportCommand = {
+    usage: "/export",
+    help: "Save this chat as a Markdown file in the export folder",
+    run(ctx) {
+      if (!ctx.chat || ctx.chat.messages.length === 0)
+        return { kind: "notice", text: "There is nothing to export yet." };
+      try {
+        const path = exportChat(ctx.host, ctx.config, ctx.chat);
+        return { kind: "notice", text: `Exported to \`${path.replace(ctx.host.env.HOME ?? "\x00", "~")}\`.` };
+      } catch (error) {
+        return { kind: "notice", text: `The export failed: ${String(error)}. Check the export folder in Configuration.` };
+      }
+    }
+  };
+  var title = {
+    usage: "/title <text>",
+    help: "Name this chat yourself; automatic titles never replace it",
+    run(ctx, args) {
+      if (args === "")
+        return { kind: "notice", text: `Title: **${ctx.chat ? displayTitle(ctx.chat) : DEFAULT_TITLE}**. Use \`/title <text>\` to rename it.` };
+      const chat = ctx.ensureChat();
+      setTitleManual(ctx.host, chat.id, args.slice(0, 120));
+      return { kind: "notice", text: `Title set to **${args.slice(0, 120)}**.` };
+    }
+  };
+  function toggle(field, on, off) {
+    return (ctx) => {
+      const chat = ctx.ensureChat();
+      let value = false;
+      mutateChat(ctx.host, chat.id, (current) => {
+        current[field] = !current[field];
+        value = current[field];
+      });
+      return { kind: "notice", text: value ? on : off };
+    };
+  }
+  var pin = {
+    usage: "/pin",
+    help: "Pin or unpin this chat so it stays at the top and is never pruned",
+    run: toggle("pinned", "Pinned. It stays at the top of the history and is never pruned.", "Unpinned.")
+  };
+  var archive = {
+    usage: "/archive",
+    help: "Archive or restore this chat",
+    run: toggle("archived", "Archived. Find it with `archived` in the history list.", "Restored from the archive.")
+  };
+  var feature3 = {
+    commands: { export: exportCommand, title, pin, archive },
+    afterCommit,
+    finalizers: { title: titleFinalizer }
+  };
 
   // src/features/image.ts
   var IMAGE_MESSAGE_SUFFIX = "-img";
@@ -2706,7 +3180,7 @@ ${renderTranscript(visible)}
       if (modelId === "")
         return { kind: "notice", text: "Choose an image model first: set Image Model in the workflow's Configuration, or add `--model <id>`." };
       if (ctx.config.apiKey === "")
-        return { kind: "notice", text: "Add your OpenRouter API key in the workflow's Configuration first." };
+        return { kind: "notice", text: ctx.config.keyIssue ?? "Add your OpenRouter API key in the workflow's Configuration first." };
       const chat = ctx.ensureChat();
       const result = admit(ctx.host, {
         lane: `chat:${chat.id}`,
@@ -2892,7 +3366,7 @@ ${ctx.state.content}`;
       const list = reply ? sourcesOf(reply) : [];
       if (list.length === 0)
         return { kind: "notice", text: "The last reply cited no sources." };
-      return { kind: "notice", text: ["**Sources**", ...list.map((source, i) => `${i + 1}. [${source.title}](${source.url})`)].join(`
+      return { kind: "notice", text: ["**Sources**", ...list.map((source, i) => `${i + 1}. ${sourceLine(source)}`)].join(`
 `) };
     }
   };
@@ -2918,12 +3392,17 @@ ${ctx.state.content}`;
   function readConfig(host) {
     const env = host.env;
     const engine = text(env.pdf_engine, "auto");
+    const privacy = text(env.privacy_mode, "deny");
+    const key = (env.openrouter_api_key ?? "").trim();
+    const keyIssue = keyProblem(key);
     return {
-      apiKey: (env.openrouter_api_key ?? "").trim(),
+      apiKey: keyIssue === null ? key : "",
+      keyIssue,
       defaultModel: text(env.default_model, FALLBACK_MODEL),
+      privacy: privacy === "standard" || privacy === "zdr" ? privacy : "deny",
+      webRewrite: env.web_rewrite !== "0",
       systemPrompt: env.system_prompt ?? "",
       systemContext: env.system_context !== "0",
-      sourcesIcons: env.sources_style === "icons",
       presetClipboard: env.preset_clipboard === "1",
       maxContext: Math.max(1, int(env.max_context, 20)),
       timeoutSeconds: Math.max(5, int(env.timeout_seconds, 90)),
@@ -2938,6 +3417,7 @@ ${ctx.state.content}`;
       exportFolder: text(env.export_folder, "~/Documents/AI Chat"),
       imagesFolder: text(env.images_folder, "~/Pictures/AI Chat"),
       imageModel: text(env.image_model, ""),
+      savePrompts: env.image_save_prompt === "1",
       imageTimeoutSeconds: Math.max(10, int(env.image_timeout_seconds, 300)),
       visionFallbackModel: text(env.vision_fallback_model, ""),
       retentionDays: Math.max(0, int(env.retention_days, 0)),
@@ -2976,119 +3456,6 @@ ${ctx.state.content}`;
     return finalizers;
   }
 
-  // src/store/favicons.ts
-  var ICON_SERVICE = "https://icons.duckduckgo.com/ip3";
-  var ICON_SIZE = 32;
-  var MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
-  var BAD_RETRY_MS = 7 * 24 * 60 * 60 * 1000;
-  var STUCK_MS = 30 * 1000;
-  var folder = (host) => `${cacheDir(host)}/favicons`;
-  function ascii(text) {
-    return Uint8Array.from({ length: text.length }, (_, i) => text.charCodeAt(i) & 127);
-  }
-  function faviconPaths(host, domain) {
-    const key = sha256Hex(ascii(domain)).slice(0, 24);
-    const base = `${folder(host)}/${key}`;
-    return { png: `${base}.png`, raw: `${base}.raw`, exit: `${base}.exit`, pid: `${base}.pid`, err: `${base}.err`, bad: `${base}.bad`, started: `${base}.started` };
-  }
-  function age(host, path) {
-    const info = host.stat(path);
-    return info ? host.nowMs() - info.mtimeMs : null;
-  }
-  function cleanup(host, files) {
-    for (const path of [files.raw, files.exit, files.pid, files.err, files.started])
-      host.remove(path);
-  }
-  function finish(host, files) {
-    let ok = false;
-    try {
-      const exit = Number(host.readText(files.exit).trim());
-      const info = host.stat(files.raw);
-      if (exit === 0 && info && info.size > 0 && info.size <= MAX_ICON_BYTES && isRasterIcon(host.readBytesFrom(files.raw, 0))) {
-        const result = host.runSync(["/usr/bin/sips", "-s", "format", "png", "-Z", String(ICON_SIZE), files.raw, "--out", files.png], { timeoutMs: 1e4 });
-        ok = result.exit === 0 && host.exists(files.png);
-      }
-    } catch {
-      ok = false;
-    }
-    if (!ok) {
-      host.remove(files.png);
-      host.writeAtomic(files.bad, "bad");
-    }
-    cleanup(host, files);
-    return ok ? files.png : null;
-  }
-  function start(host, domain, files) {
-    cleanup(host, files);
-    const base = host.env.aichat_favicon_base ?? ICON_SERVICE;
-    const scheme = base.startsWith("http://") ? "http" : "https";
-    host.writeAtomic(files.started, String(host.nowMs()));
-    host.spawnSupervised([
-      host.env.aichat_curl ?? "/usr/bin/curl",
-      "--silent",
-      "--show-error",
-      "--fail",
-      "--proto",
-      `=${scheme}`,
-      "--proto-redir",
-      "=https",
-      "--max-redirs",
-      "2",
-      "--max-filesize",
-      String(MAX_ICON_BYTES),
-      "--connect-timeout",
-      "4",
-      "--max-time",
-      "8",
-      "-o",
-      files.raw,
-      `${base}/${domain}.ico`
-    ], { pid: files.pid, exit: files.exit, stderr: files.err });
-  }
-  function resolveFavicons(host, domains, options) {
-    const found = new Map;
-    host.mkdirp(folder(host));
-    for (const domain of domains) {
-      if (!isSafeDomain(domain)) {
-        found.set(domain, null);
-        continue;
-      }
-      const files = faviconPaths(host, domain);
-      const pngAge = age(host, files.png);
-      if (pngAge !== null && pngAge < MAX_AGE_MS) {
-        found.set(domain, files.png);
-        continue;
-      }
-      const badAge = age(host, files.bad);
-      if (badAge !== null && badAge < BAD_RETRY_MS) {
-        found.set(domain, null);
-        continue;
-      }
-      if (host.exists(files.exit)) {
-        found.set(domain, finish(host, files));
-        continue;
-      }
-      const startedAge = age(host, files.started);
-      if (startedAge !== null && startedAge < STUCK_MS) {
-        found.set(domain, null);
-        continue;
-      }
-      if (options.start)
-        start(host, domain, files);
-      found.set(domain, null);
-    }
-    return found;
-  }
-  function loadFavicons(host, domains, waitMs) {
-    let found = resolveFavicons(host, domains, { start: true });
-    const deadline = host.nowMs() + waitMs;
-    while (host.nowMs() < deadline && domains.some((domain) => found.get(domain) === null && isSafeDomain(domain) && host.exists(faviconPaths(host, domain).started))) {
-      host.sleepMs(100);
-      found = resolveFavicons(host, domains, { start: false });
-    }
-    return found;
-  }
-
   // src/store/current-chat.ts
   function initialSettings(config) {
     const reasoning = config.reasoningDefault;
@@ -3112,7 +3479,7 @@ ${ctx.state.content}`;
   }
 
   // src/store/system-context.ts
-  var MAX_AGE_MS2 = 60 * 60 * 1000;
+  var MAX_AGE_MS = 60 * 60 * 1000;
   function run(host, argv) {
     try {
       const result = host.runSync(argv, { timeoutMs: 3000 });
@@ -3127,7 +3494,7 @@ ${ctx.state.content}`;
     let cached = null;
     try {
       const parsed = JSON.parse(host.readText(path));
-      if (host.nowMs() - parsed.at < MAX_AGE_MS2)
+      if (host.nowMs() - parsed.at < MAX_AGE_MS)
         cached = parsed;
     } catch {}
     if (!cached) {
@@ -3150,7 +3517,7 @@ ${ctx.state.content}`;
   // src/app/view.ts
   function viewJson(frame) {
     const view = {
-      response: frame.response,
+      response: sanitizeMarkdown(frame.response, { imageRoots: frame.imageRoots ?? [] }),
       footer: frame.footer,
       behaviour: { response: frame.mode, scroll: "end", inputfield: "select" },
       variables: { request_id: frame.requestId, view_stage: frame.stage }
@@ -3171,34 +3538,11 @@ ${ctx.state.content}`;
   var PHASE_LABEL = { connecting: "connecting", processing: "processing", thinking: "thinking", answering: "answering" };
   var chatLane = (chatId) => `chat:${chatId}`;
   var SOURCE_CAP = 8;
-  var ICON_WAIT_MS = 1500;
-  function domainsOfMessage(message) {
-    const found = [];
-    for (const source of sourcesOf(message)) {
-      const domain = domainOf(source.url);
-      if (domain !== null && found.indexOf(domain) < 0)
-        found.push(domain);
-    }
-    return found;
+  function viewJson2(host, config, frame) {
+    return viewJson({ ...frame, imageRoots: [imagesFolder(host, config)] });
   }
-  function viewTranscript(host, chat, waitMs) {
-    return flattenTables(transcriptWithSources(host, chat, waitMs));
-  }
-  function transcriptWithSources(host, chat, waitMs) {
-    const withSources = chat.messages.filter((message) => sourcesOf(message).length > 0);
-    if (withSources.length === 0)
-      return renderTranscript(chat);
-    if (!readConfig(host).sourcesIcons)
-      return renderTranscript(chat, { cap: SOURCE_CAP, icons: false, icon: () => null });
-    const every = new Set;
-    for (const message of withSources)
-      for (const domain of domainsOfMessage(message))
-        every.add(domain);
-    const icons = resolveFavicons(host, [...every], { start: false });
-    const newest = domainsOfMessage(withSources[withSources.length - 1]).slice(0, SOURCE_CAP);
-    for (const [domain, path] of loadFavicons(host, newest, waitMs))
-      icons.set(domain, path);
-    return renderTranscript(chat, { cap: SOURCE_CAP, icons: true, icon: (domain) => icons.get(domain) ?? null });
+  function viewTranscript(chat) {
+    return flattenTables(renderTranscript(chat, { sourcesRowCap: SOURCE_CAP }));
   }
   function resolveModelId(host, config, chat) {
     return chat?.model ?? getSettings(host).defaultModel ?? config.defaultModel;
@@ -3234,7 +3578,7 @@ ${ctx.state.content}`;
   function idleView(host, config, notice, icon = "ℹ️") {
     const chat = currentChat(host);
     const modelId = resolveModelId(host, config, chat);
-    const body = chat && chat.messages.length > 0 ? viewTranscript(host, chat, 0) : WELCOME;
+    const body = chat && chat.messages.length > 0 ? viewTranscript(chat) : WELCOME;
     const retry = chat?.retry ? `The last message failed (${chat.retry.error}). Type \`/retry\` to send it again.` : null;
     const pending = chat?.pending ?? [];
     const waiting = pending.length > 0 ? ["**\uD83D\uDCCE Ready to send with your next message**", ...pending.map((ref) => `- ${ref.name} (${formatSize(ref.size)})`), "", "Type your question and press ↩. `/detach` removes a file."].join(`
@@ -3247,7 +3591,7 @@ ${ctx.state.content}`;
       requestId: "",
       stage: ""
     };
-    return viewJson(frame);
+    return viewJson2(host, config, frame);
   }
   function stateLabel(outcome, record) {
     const state = outcome ? outcome.state : record.state;
@@ -3258,7 +3602,7 @@ ${ctx.state.content}`;
     const modelId = record.model;
     const parts = [];
     if (chat && chat.messages.length > 0)
-      parts.push(viewTranscript(host, chat, ICON_WAIT_MS));
+      parts.push(viewTranscript(chat));
     const committed = chat !== null && chat.messages.some((message) => message.requestId === record.id);
     if (!committed) {
       if (record.kind !== "title") {
@@ -3273,7 +3617,7 @@ ${ctx.state.content}`;
     }
     if (chat?.retry)
       parts.push(`_Type \`/retry\` to send the last message again._`);
-    return viewJson({
+    return viewJson2(host, config, {
       response: join(...parts),
       footer: footer([modelId, stateLabel(outcome, record), ...footerFlagsFor(host, config, chat, modelId, record)]),
       mode: "replace",
@@ -3282,13 +3626,6 @@ ${ctx.state.content}`;
     });
   }
   function assistantSection(host, config, record, chat) {
-    const cited = record.reducer.annotations.flatMap((annotation) => {
-      const inner = typeof annotation.url_citation === "object" && annotation.url_citation !== null ? annotation.url_citation : annotation;
-      const domain = typeof inner.url === "string" ? domainOf(inner.url) : null;
-      return domain === null ? [] : [domain];
-    });
-    if (cited.length > 0 && config.sourcesIcons)
-      resolveFavicons(host, [...new Set(cited)].slice(0, SOURCE_CAP), { start: true });
     if (record.kind === "image")
       return `${ASSISTANT_HEADING}
 
@@ -3307,13 +3644,13 @@ ${flattenTables(body)}`;
     const bar = footer([record.model, `${phase} ${elapsed}s`, ...footerFlagsFor(host, config, chat, record.model, record), hint]);
     const base = { footer: bar, requestId: record.id, rerun: RERUN_SECONDS };
     if (stage === "live") {
-      return viewJson({ ...base, response: assistantSection(host, config, record, chat), mode: "replacelast", stage: "live" });
+      return viewJson2(host, config, { ...base, response: assistantSection(host, config, record, chat), mode: "replacelast", stage: "live" });
     }
     if (stage === "header") {
-      return viewJson({ ...base, response: assistantSection(host, config, record, chat), mode: "append", stage: "live" });
+      return viewJson2(host, config, { ...base, response: assistantSection(host, config, record, chat), mode: "append", stage: "live" });
     }
-    const history = chat && chat.messages.length > 0 ? viewTranscript(host, chat, 0) : null;
-    return viewJson({ ...base, response: join(history, history ? TURN_BREAK : null, draftBlock(record.draft.text, record.draft.attachments)), mode: "replace", stage: "header" });
+    const history = chat && chat.messages.length > 0 ? viewTranscript(chat) : null;
+    return viewJson2(host, config, { ...base, response: join(history, history ? TURN_BREAK : null, draftBlock(record.draft.text, record.draft.attachments)), mode: "replace", stage: "header" });
   }
   function handleRerun(host, config, finalizers, rid, typed) {
     const step = advance(host, rid, finalizers);
@@ -3332,7 +3669,7 @@ ${flattenTables(body)}`;
   }
   function send(host, config, finalizers, text, options = {}) {
     if (config.apiKey === "") {
-      return idleView(host, config, "**Add your OpenRouter API key.** Open this workflow's Configuration in Alfred Preferences and paste a key from openrouter.ai/keys. Your message is still in the input.", "⚠️");
+      return idleView(host, config, config.keyIssue ?? "**Add your OpenRouter API key.** Open this workflow's Configuration in Alfred Preferences and paste a key from openrouter.ai/keys. Your message is still in the input.", "⚠️");
     }
     const chat = ensureCurrentChat(host, config);
     const modelId = resolveModelId(host, config, chat);
@@ -3351,8 +3688,8 @@ ${flattenTables(body)}`;
       turns.push({ role: message.role, content: message.content, ...message.annotations ? { annotations: message.annotations } : {} });
     const notes = [];
     let userText = text;
-    if (chat.settings.web && draft.attachments.length === 0) {
-      const standalone = standaloneMessage(host, config.apiKey, config.titleModel !== "" ? config.titleModel : config.defaultModel, history, text);
+    if (chat.settings.web && config.webRewrite && draft.attachments.length === 0) {
+      const standalone = standaloneMessage(host, config.apiKey, config.privacy, config.titleModel !== "" ? config.titleModel : config.defaultModel, history, text);
       if (standalone.text !== null) {
         userText = standalone.text;
         notes.push(`searched “${standalone.text.length > 60 ? `${standalone.text.slice(0, 60)}…` : standalone.text}”`);
@@ -3369,7 +3706,8 @@ ${flattenTables(body)}`;
       web: chat.settings.web,
       webMaxResults: config.webMaxResults,
       effort: chat.settings.effort,
-      excludeReasoning: false
+      excludeReasoning: false,
+      privacy: config.privacy
     };
     let currentTurns = turns;
     const context = () => ({ host, config, chat, modelId: payloadOptions.modelId, model: payloadOptions.model, turns: currentTurns, window: history, draft, options: payloadOptions });
@@ -3477,36 +3815,6 @@ ${flattenTables(body)}`;
     return handleFresh(host, config, finalizers, typed);
   }
 
-  // src/host/common.ts
-  var SUPERVISOR_SCRIPT = [
-    "pid_file=$1; exit_file=$2; err_file=$3; shift 3",
-    '"$@" </dev/null >/dev/null 2>"$err_file" &',
-    "child=$!",
-    'printf "%s" "$child" > "$pid_file.tmp" && mv "$pid_file.tmp" "$pid_file"',
-    'wait "$child"',
-    "status=$?",
-    'printf "%s" "$status" > "$exit_file.tmp" && mv "$exit_file.tmp" "$exit_file"'
-  ].join(`
-`);
-  function supervisorArgv(argv, files) {
-    if (argv.length === 0)
-      throw new Error("spawnSupervised needs a command");
-    return ["/bin/sh", "-c", SUPERVISOR_SCRIPT, "sh", files.pid, files.exit, files.stderr, ...argv];
-  }
-  function psArgv(pid) {
-    return ["/bin/ps", "-ww", "-o", "command=", "-p", String(Math.trunc(pid))];
-  }
-  function commandFromPs(result) {
-    const text = result.stdout.trim();
-    return result.exit === 0 && text !== "" ? text : null;
-  }
-  function killArgv(pid) {
-    return ["/bin/kill", "-s", "TERM", String(Math.trunc(pid))];
-  }
-  function isSafePid(pid) {
-    return Number.isInteger(pid) && pid > 1;
-  }
-
   // src/host/jxa.ts
   function isNil(value) {
     if (value === null || value === undefined)
@@ -3526,24 +3834,44 @@ ${flattenTables(body)}`;
   function fileManager() {
     return $.NSFileManager.defaultManager;
   }
+  var PRIVATE_DIR = 448;
+  var PRIVATE_FILE = 384;
+  function permissions(mode) {
+    return $({ NSFilePosixPermissions: mode });
+  }
   function fail2(action, path) {
     throw new Error(`${action} failed for ${path}`);
   }
-  function launch(argv, out, err) {
+  function launch(argv, out, err, env, stdin) {
     const task = $.NSTask.alloc.init;
     const absolute = argv[0].charAt(0) === "/";
     task.executableURL = $.NSURL.fileURLWithPath(absolute ? argv[0] : "/usr/bin/env");
     task.arguments = absolute ? argv.slice(1) : argv;
-    task.standardInput = $.NSFileHandle.fileHandleWithNullDevice;
+    task.environment = $(scrubbedEnv(env));
+    const pipe = stdin === undefined ? null : $.NSPipe.pipe;
+    task.standardInput = pipe === null ? $.NSFileHandle.fileHandleWithNullDevice : pipe;
     task.standardOutput = out;
     task.standardError = err;
     if (!task.launchAndReturnError(false))
       throw new Error(`could not launch ${argv[0]}`);
+    if (pipe !== null) {
+      const writer = pipe.fileHandleForWriting;
+      try {
+        writer.writeData(nsString(stdin).dataUsingEncoding($.NSUTF8StringEncoding));
+      } catch {}
+      writer.closeFile;
+    }
     return task;
   }
 
   class JxaHost {
     env = ObjC.deepUnwrap($.NSProcessInfo.processInfo.environment);
+    constructor() {
+      try {
+        ObjC.bindFunction("umask", ["int", ["int"]]);
+        $.umask(63);
+      } catch {}
+    }
     readText(path) {
       const text = $.NSString.stringWithContentsOfFileEncodingError(path, $.NSUTF8StringEncoding, $());
       if (isNil(text))
@@ -3565,13 +3893,14 @@ ${flattenTables(body)}`;
       const payload = typeof data === "string" ? nsString(data).dataUsingEncoding($.NSUTF8StringEncoding) : dataFromBytes(data);
       if (!payload.writeToFileAtomically(path, true))
         fail2("write", path);
+      fileManager().setAttributesOfItemAtPathError(permissions(PRIVATE_FILE), path, $());
     }
     mkdirp(path) {
-      if (!fileManager().createDirectoryAtPathWithIntermediateDirectoriesAttributesError(path, true, $(), $()))
+      if (!fileManager().createDirectoryAtPathWithIntermediateDirectoriesAttributesError(path, true, permissions(PRIVATE_DIR), $()))
         fail2("mkdir", path);
     }
     mkdirExclusive(path) {
-      if (fileManager().createDirectoryAtPathWithIntermediateDirectoriesAttributesError(path, false, $(), $()))
+      if (fileManager().createDirectoryAtPathWithIntermediateDirectoriesAttributesError(path, false, permissions(PRIVATE_DIR), $()))
         return true;
       if (fileManager().fileExistsAtPath(path))
         return false;
@@ -3582,12 +3911,31 @@ ${flattenTables(body)}`;
         fail2("move", `${from} to ${to}`);
     }
     remove(path) {
-      if (fileManager().fileExistsAtPath(path))
-        fileManager().removeItemAtPathError(path, $());
+      if (fileManager().fileExistsAtPath(path) && !fileManager().removeItemAtPathError(path, $()))
+        fail2("remove", path);
     }
-    trash(path) {
-      if (!fileManager().trashItemAtURLResultingItemURLError($.NSURL.fileURLWithPath(path), Ref(), $()))
-        fail2("trash", path);
+    restrict(path) {
+      const manager = fileManager();
+      if (!manager.fileExistsAtPath(path))
+        return;
+      const apply = (item) => {
+        const attributes = manager.attributesOfItemAtPathError(item, $());
+        if (isNil(attributes))
+          fail2("read the permissions of", item);
+        const type = String(ObjC.unwrap(attributes.objectForKey("NSFileType")));
+        if (type === "NSFileTypeSymbolicLink")
+          return type;
+        if (!manager.setAttributesOfItemAtPathError(permissions(type === "NSFileTypeDirectory" ? PRIVATE_DIR : PRIVATE_FILE), item, $()))
+          fail2("restrict", item);
+        return type;
+      };
+      if (apply(path) !== "NSFileTypeDirectory")
+        return;
+      const names = manager.subpathsOfDirectoryAtPathError(path, $());
+      if (isNil(names))
+        fail2("list", path);
+      for (const name of ObjC.deepUnwrap(names))
+        apply(`${path}/${name}`);
     }
     exists(path) {
       return fileManager().fileExistsAtPath(path);
@@ -3609,9 +3957,9 @@ ${flattenTables(body)}`;
         fail2("list", path);
       return ObjC.deepUnwrap(names);
     }
-    spawnSupervised(argv, files) {
+    spawnSupervised(argv, files, options = {}) {
       const nullDevice = $.NSFileHandle.fileHandleWithNullDevice;
-      launch(supervisorArgv(argv, files), nullDevice, nullDevice);
+      launch(supervisorArgv(argv, files), nullDevice, nullDevice, this.env, options.stdin);
     }
     processCommand(pid) {
       if (!isSafePid(pid))
@@ -3632,12 +3980,12 @@ ${flattenTables(body)}`;
       this.mkdirp(folder);
       const outPath = `${folder}/out`;
       const errPath = `${folder}/err`;
-      fileManager().createFileAtPathContentsAttributes(outPath, $(), $());
-      fileManager().createFileAtPathContentsAttributes(errPath, $(), $());
+      fileManager().createFileAtPathContentsAttributes(outPath, $(), permissions(PRIVATE_FILE));
+      fileManager().createFileAtPathContentsAttributes(errPath, $(), permissions(PRIVATE_FILE));
       const out = $.NSFileHandle.fileHandleForWritingAtPath(outPath);
       const err = $.NSFileHandle.fileHandleForWritingAtPath(errPath);
       try {
-        const task = launch(argv, out, err);
+        const task = launch(argv, out, err, this.env, options.stdin);
         const deadline = options.timeoutMs === undefined ? Infinity : Date.now() + options.timeoutMs;
         let timedOut = false;
         while (task.isRunning) {
@@ -3669,6 +4017,19 @@ ${flattenTables(body)}`;
     }
     randomId() {
       return String(ObjC.unwrap($.NSUUID.UUID.UUIDString)).toLowerCase().replace(/-/g, "");
+    }
+    confirm(message, action) {
+      const app = Application.currentApplication();
+      app.includeStandardAdditions = true;
+      try {
+        app.activate();
+      } catch {}
+      try {
+        const answer = app.displayDialog(message, { buttons: ["Cancel", action], defaultButton: "Cancel", cancelButton: "Cancel", withIcon: "caution", givingUpAfter: 120 });
+        return answer.buttonReturned === action && !answer.gaveUp;
+      } catch {
+        return false;
+      }
     }
     chooseFiles(options = {}) {
       const app = Application.currentApplication();
@@ -3707,12 +4068,60 @@ ${flattenTables(body)}`;
       return isNil(text) ? null : String(ObjC.unwrap(text));
     }
     log(message) {
-      $.NSFileHandle.fileHandleWithStandardError.writeData(nsString(`${message}
+      $.NSFileHandle.fileHandleWithStandardError.writeData(nsString(`${redact(message, this.env)}
 `).dataUsingEncoding($.NSUTF8StringEncoding));
     }
   }
   function createJxaHost() {
     return new JxaHost;
+  }
+
+  // src/store/maintenance.ts
+  var PRIVATE_MARK = ".private-v1";
+  var SWEPT_MARK = ".swept";
+  var SWEEP_EVERY_MS = 60 * 60 * 1000;
+  function maintained(host) {
+    runMaintenance(host);
+    return host;
+  }
+  function runMaintenance(host) {
+    try {
+      const data = dataDir(host);
+      const cache = cacheDir(host);
+      const swept = host.stat(`${data}/${SWEPT_MARK}`);
+      const fresh = swept !== null && host.nowMs() - swept.mtimeMs <= SWEEP_EVERY_MS;
+      if (fresh && host.exists(`${data}/${PRIVATE_MARK}`))
+        return;
+      host.mkdirp(data);
+      host.mkdirp(cache);
+      if (!host.exists(`${data}/${PRIVATE_MARK}`)) {
+        host.restrict(data);
+        host.restrict(cache);
+        host.remove(`${cache}/favicons`);
+        host.writeAtomic(`${data}/${PRIVATE_MARK}`, "1");
+      }
+      if (!fresh) {
+        sweepRequests(host);
+        host.writeAtomic(`${data}/${SWEPT_MARK}`, String(host.nowMs()));
+      }
+    } catch (error) {
+      host.log(`maintenance failed: ${String(error)}`);
+    }
+  }
+  function sweepRequests(host) {
+    if (!host.exists(requestsDir(host)))
+      return;
+    const now = host.nowMs();
+    for (const rid of host.listDir(requestsDir(host))) {
+      const dir = requestDir(host, rid);
+      const info = host.stat(dir);
+      if (info === null || now - info.mtimeMs < SWEEP_EVERY_MS)
+        continue;
+      const record = loadRecord(host, rid);
+      const valid = record !== null && typeof record.id === "string" && typeof record.lane === "string" && typeof record.startedAt === "number";
+      if (!valid || record.final || laneRecordId(host, record.lane) !== rid)
+        host.remove(dir);
+    }
   }
 
   // src/jxa/entry.ts
@@ -3721,6 +4130,6 @@ ${flattenTables(body)}`;
   }
 
   // src/entries/chat.ts
-  defineEntry((argv) => main(createJxaHost(), argv));
+  defineEntry((argv) => main(maintained(createJxaHost()), argv));
 })();
 function run(argv) { return __aichat_main(argv); }

@@ -1,8 +1,6 @@
 import { decodeBase64, encodeBase64 } from "../core/base64";
-import { commandFromPs, isSafePid, killArgv, psArgv, supervisorArgv } from "./common";
+import { commandFromPs, isSafePid, killArgv, psArgv, redact, scrubbedEnv, supervisorArgv } from "./common";
 import type { ChooseFilesOptions, ChooseFilesResult, FileStat, Host, RunResult, SupervisorFiles } from "./types";
-
-declare const Ref: () => any;
 
 // The ObjC bridge hands back wrapped objects; a nil result arrives as undefined or null once unwrapped.
 function isNil(value: any): boolean {
@@ -27,24 +25,55 @@ function fileManager(): any {
   return $.NSFileManager.defaultManager;
 }
 
+const PRIVATE_DIR = 0o700;
+const PRIVATE_FILE = 0o600;
+
+function permissions(mode: number): any {
+  return $({ NSFilePosixPermissions: mode });
+}
+
 function fail(action: string, path: string): never {
   throw new Error(`${action} failed for ${path}`);
 }
 
-function launch(argv: string[], out: any, err: any): any {
+// The child gets the environment without the API key variable. Its stdin is the null device, or a pipe
+// that is filled and closed right after launch: the secret is small, so it sits in the pipe's buffer
+// and the child can read it after this process has exited.
+function launch(argv: string[], out: any, err: any, env: Record<string, string | undefined>, stdin?: string): any {
   const task = $.NSTask.alloc.init;
   const absolute = argv[0]!.charAt(0) === "/";
   task.executableURL = $.NSURL.fileURLWithPath(absolute ? argv[0] : "/usr/bin/env");
   task.arguments = absolute ? argv.slice(1) : argv;
-  task.standardInput = $.NSFileHandle.fileHandleWithNullDevice;
+  task.environment = $(scrubbedEnv(env));
+  const pipe = stdin === undefined ? null : $.NSPipe.pipe;
+  task.standardInput = pipe === null ? $.NSFileHandle.fileHandleWithNullDevice : pipe;
   task.standardOutput = out;
   task.standardError = err;
   if (!task.launchAndReturnError(false)) throw new Error(`could not launch ${argv[0]}`);
+  if (pipe !== null) {
+    const writer = pipe.fileHandleForWriting;
+    try {
+      writer.writeData(nsString(stdin as string).dataUsingEncoding($.NSUTF8StringEncoding));
+    } catch {
+      // The child already exited; it has nothing left to read.
+    }
+    writer.closeFile;
+  }
   return task;
 }
 
 class JxaHost implements Host {
   env: Record<string, string | undefined> = ObjC.deepUnwrap($.NSProcessInfo.processInfo.environment);
+
+  constructor() {
+    // Anything this process or its children create is private by default; the explicit modes below do not rely on it.
+    try {
+      ObjC.bindFunction("umask", ["int", ["int"]]);
+      $.umask(0o077);
+    } catch {
+      // the explicit modes still apply
+    }
+  }
 
   readText(path: string): string {
     const text = $.NSString.stringWithContentsOfFileEncodingError(path, $.NSUTF8StringEncoding, $());
@@ -66,14 +95,15 @@ class JxaHost implements Host {
   writeAtomic(path: string, data: Uint8Array | string): void {
     const payload = typeof data === "string" ? nsString(data).dataUsingEncoding($.NSUTF8StringEncoding) : dataFromBytes(data);
     if (!payload.writeToFileAtomically(path, true)) fail("write", path);
+    fileManager().setAttributesOfItemAtPathError(permissions(PRIVATE_FILE), path, $());
   }
 
   mkdirp(path: string): void {
-    if (!fileManager().createDirectoryAtPathWithIntermediateDirectoriesAttributesError(path, true, $(), $())) fail("mkdir", path);
+    if (!fileManager().createDirectoryAtPathWithIntermediateDirectoriesAttributesError(path, true, permissions(PRIVATE_DIR), $())) fail("mkdir", path);
   }
 
   mkdirExclusive(path: string): boolean {
-    if (fileManager().createDirectoryAtPathWithIntermediateDirectoriesAttributesError(path, false, $(), $())) return true;
+    if (fileManager().createDirectoryAtPathWithIntermediateDirectoriesAttributesError(path, false, permissions(PRIVATE_DIR), $())) return true;
     if (fileManager().fileExistsAtPath(path)) return false;
     return fail("mkdir", path);
   }
@@ -83,11 +113,25 @@ class JxaHost implements Host {
   }
 
   remove(path: string): void {
-    if (fileManager().fileExistsAtPath(path)) fileManager().removeItemAtPathError(path, $());
+    if (fileManager().fileExistsAtPath(path) && !fileManager().removeItemAtPathError(path, $())) fail("remove", path);
   }
 
-  trash(path: string): void {
-    if (!fileManager().trashItemAtURLResultingItemURLError($.NSURL.fileURLWithPath(path), Ref(), $())) fail("trash", path);
+  // A path that is missing is skipped; any other failure throws, so a caller never records a migration that did not happen.
+  restrict(path: string): void {
+    const manager = fileManager();
+    if (!manager.fileExistsAtPath(path)) return;
+    const apply = (item: string): string => {
+      const attributes = manager.attributesOfItemAtPathError(item, $());
+      if (isNil(attributes)) fail("read the permissions of", item);
+      const type = String(ObjC.unwrap(attributes.objectForKey("NSFileType")));
+      if (type === "NSFileTypeSymbolicLink") return type;
+      if (!manager.setAttributesOfItemAtPathError(permissions(type === "NSFileTypeDirectory" ? PRIVATE_DIR : PRIVATE_FILE), item, $())) fail("restrict", item);
+      return type;
+    };
+    if (apply(path) !== "NSFileTypeDirectory") return;
+    const names = manager.subpathsOfDirectoryAtPathError(path, $());
+    if (isNil(names)) fail("list", path);
+    for (const name of ObjC.deepUnwrap(names) as string[]) apply(`${path}/${name}`);
   }
 
   exists(path: string): boolean {
@@ -111,9 +155,9 @@ class JxaHost implements Host {
     return ObjC.deepUnwrap(names);
   }
 
-  spawnSupervised(argv: string[], files: SupervisorFiles): void {
+  spawnSupervised(argv: string[], files: SupervisorFiles, options: { stdin?: string } = {}): void {
     const nullDevice = $.NSFileHandle.fileHandleWithNullDevice;
-    launch(supervisorArgv(argv, files), nullDevice, nullDevice);
+    launch(supervisorArgv(argv, files), nullDevice, nullDevice, this.env, options.stdin);
   }
 
   processCommand(pid: number): string | null {
@@ -131,17 +175,17 @@ class JxaHost implements Host {
   }
 
   // Output goes through files so a chatty child can never fill a pipe nobody is reading.
-  runSync(argv: string[], options: { timeoutMs?: number } = {}): RunResult {
+  runSync(argv: string[], options: { timeoutMs?: number; stdin?: string } = {}): RunResult {
     const folder = `${ObjC.unwrap($.NSTemporaryDirectory())}aichat-run-${this.randomId()}`;
     this.mkdirp(folder);
     const outPath = `${folder}/out`;
     const errPath = `${folder}/err`;
-    fileManager().createFileAtPathContentsAttributes(outPath, $(), $());
-    fileManager().createFileAtPathContentsAttributes(errPath, $(), $());
+    fileManager().createFileAtPathContentsAttributes(outPath, $(), permissions(PRIVATE_FILE));
+    fileManager().createFileAtPathContentsAttributes(errPath, $(), permissions(PRIVATE_FILE));
     const out = $.NSFileHandle.fileHandleForWritingAtPath(outPath);
     const err = $.NSFileHandle.fileHandleForWritingAtPath(errPath);
     try {
-      const task = launch(argv, out, err);
+      const task = launch(argv, out, err, this.env, options.stdin);
       const deadline = options.timeoutMs === undefined ? Infinity : Date.now() + options.timeoutMs;
       let timedOut = false;
       while (task.isRunning) {
@@ -175,6 +219,22 @@ class JxaHost implements Host {
 
   randomId(): string {
     return String(ObjC.unwrap($.NSUUID.UUID.UUIDString)).toLowerCase().replace(/-/g, "");
+  }
+
+  confirm(message: string, action: string): boolean {
+    const app = (Application as any).currentApplication();
+    app.includeStandardAdditions = true;
+    try {
+      app.activate();
+    } catch {
+      // The dialog still shows; it is only not brought to the front.
+    }
+    try {
+      const answer = app.displayDialog(message, { buttons: ["Cancel", action], defaultButton: "Cancel", cancelButton: "Cancel", withIcon: "caution", givingUpAfter: 120 });
+      return answer.buttonReturned === action && !answer.gaveUp;
+    } catch {
+      return false;
+    }
   }
 
   chooseFiles(options: ChooseFilesOptions = {}): ChooseFilesResult {
@@ -213,7 +273,7 @@ class JxaHost implements Host {
   }
 
   log(message: string): void {
-    $.NSFileHandle.fileHandleWithStandardError.writeData(nsString(`${message}\n`).dataUsingEncoding($.NSUTF8StringEncoding));
+    $.NSFileHandle.fileHandleWithStandardError.writeData(nsString(`${redact(message, this.env)}\n`).dataUsingEncoding($.NSUTF8StringEncoding));
   }
 }
 

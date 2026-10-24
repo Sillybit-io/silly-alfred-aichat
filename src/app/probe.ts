@@ -41,6 +41,14 @@ export function main(host: Host, argv: string[]): string {
     host.spawnSupervised(argvList, files);
     return files;
   };
+  // The permission bits of a path as octal text (macOS stat first, GNU stat as the fallback for the bun twin).
+  const modeOf = (path: string): string => {
+    for (const args of [["-f", "%Lp"], ["-c", "%a"]]) {
+      const result = host.runSync(["/usr/bin/stat", ...args, path], { timeoutMs: 5000 });
+      if (result.exit === 0 && /^[0-7]{3,4}$/.test(result.stdout.trim())) return result.stdout.trim();
+    }
+    return "unknown";
+  };
 
   check("mkdirp", () => {
     host.mkdirp(root);
@@ -92,6 +100,25 @@ export function main(host: Host, argv: string[]): string {
     host.remove(`${root}/never-existed`);
     return expect(!host.exists(`${root}/r.txt`), "file still there");
   });
+  check("everything created is private to the user", () => {
+    host.mkdirp(`${root}/priv/deep`);
+    host.writeAtomic(`${root}/priv/deep/f.txt`, "x");
+    host.mkdirExclusive(`${root}/priv/excl`);
+    const modes = [modeOf(`${root}/priv`), modeOf(`${root}/priv/deep`), modeOf(`${root}/priv/excl`), modeOf(`${root}/priv/deep/f.txt`)];
+    return expect(modes.join(" ") === "700 700 700 600", `folder, nested, exclusive, file: ${modes.join(" ")} (want 700 700 700 600)`);
+  });
+  check("restrict tightens an existing tree and leaves links alone", () => {
+    host.mkdirp(`${root}/loose/sub`);
+    host.writeAtomic(`${root}/loose/sub/a.json`, "{}");
+    host.writeAtomic(`${root}/outside.txt`, "o");
+    host.runSync(["/bin/chmod", "755", `${root}/loose`, `${root}/loose/sub`]);
+    host.runSync(["/bin/chmod", "644", `${root}/loose/sub/a.json`, `${root}/outside.txt`]);
+    host.runSync(["/bin/ln", "-s", `${root}/outside.txt`, `${root}/loose/link`]);
+    host.restrict(`${root}/loose`);
+    host.restrict(`${root}/does-not-exist`);
+    const modes = [modeOf(`${root}/loose`), modeOf(`${root}/loose/sub`), modeOf(`${root}/loose/sub/a.json`), modeOf(`${root}/outside.txt`)];
+    return expect(modes.join(" ") === "700 700 600 644", `tree, sub, file, link target: ${modes.join(" ")} (want 700 700 600 644)`);
+  });
   check("runSync output, exit codes, and timeout", () => {
     const echo = host.runSync(["/bin/sh", "-c", "printf out; printf err >&2; exit 3"]);
     if (echo.exit !== 3 || echo.stdout !== "out" || echo.stderr !== "err") return `got ${JSON.stringify(echo)}`;
@@ -104,6 +131,27 @@ export function main(host: Host, argv: string[]): string {
     if (!waitFor(host, ok.exit, 5000) || !waitFor(host, bad.exit, 5000)) return "exit files never appeared";
     const pid = Number(host.readText(ok.pid));
     return expect(host.readText(ok.exit) === "0" && host.readText(bad.exit) === "3" && pid > 1, `exit ${host.readText(ok.exit)}/${host.readText(bad.exit)} pid ${pid}`);
+  });
+  check("the API key reaches a command on stdin only, never in its environment", () => {
+    const previous = host.env.openrouter_api_key;
+    host.env.openrouter_api_key = "aichat-probe-secret-123456";
+    try {
+      const sync = host.runSync(["/bin/sh", "-c", 'cat; printf "|%s" "${openrouter_api_key:-none}"'], { stdin: "from-stdin", timeoutMs: 5000 });
+      if (sync.stdout !== "from-stdin|none") return `runSync gave ${JSON.stringify(sync.stdout)}`;
+      const files = { pid: `${root}/key.pid`, exit: `${root}/key.exit`, stderr: `${root}/key.stderr`, remove: `${root}/key.body` };
+      host.writeAtomic(files.remove, "the conversation");
+      host.spawnSupervised(["/bin/sh", "-c", 'cat > "$1"; env > "$2"', "sh", `${root}/key.in`, `${root}/key.env`], files, { stdin: "secret-line\n" });
+      if (!waitFor(host, files.exit, 5000)) return "exit file never appeared";
+      if (host.readText(`${root}/key.in`) !== "secret-line\n") return `stdin gave ${JSON.stringify(host.readText(`${root}/key.in`))}`;
+      const environment = host.readText(`${root}/key.env`);
+      if (environment.indexOf("aichat-probe-secret") >= 0 || environment.indexOf("openrouter_api_key") >= 0) return "the key is in the environment of a supervised command";
+      if (host.exists(files.remove)) return "the body file was not removed when the command ended";
+      const made = modeOf(`${root}/key.in`);
+      return expect(made === "600", `a file the command wrote has mode ${made} (want 600)`);
+    } finally {
+      if (previous === undefined) delete host.env.openrouter_api_key;
+      else host.env.openrouter_api_key = previous;
+    }
   });
   check("processCommand and signalTerm own a live process", () => {
     const files = supervised(["/bin/sleep", "30"], "sleep");
@@ -130,10 +178,10 @@ export function main(host: Host, argv: string[]): string {
     if (text !== null && typeof text !== "string") return "text type";
     return expect(png === null || png.length > 0, "png type");
   });
-  check("trash", () => {
-    host.writeAtomic(`${root}/trash-me.txt`, "t");
-    host.trash(`${root}/trash-me.txt`);
-    return expect(!host.exists(`${root}/trash-me.txt`), "file still in place");
+  check("remove deletes for good", () => {
+    host.writeAtomic(`${root}/remove-me.txt`, "t");
+    host.remove(`${root}/remove-me.txt`);
+    return expect(!host.exists(`${root}/remove-me.txt`), "file still in place");
   });
   if (argv.indexOf("--pick") >= 0) {
     check("chooseFiles", () => {

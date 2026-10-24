@@ -59,8 +59,8 @@ export function mapHttpError(status: HttpStatus, body: string): MappedError {
   if (message !== null && POLICY_PATTERN.test(message) && (status.status === 404 || status.status === 403 || status.status === 400)) {
     return {
       title: "Blocked by your data policy",
-      detail: "Your OpenRouter privacy settings (such as zero data retention) leave no provider for this model.",
-      next: "Pick a model your settings allow with the `aimodels` keyword (add #imagegen for image models), or change the policy in your OpenRouter privacy settings.",
+      detail: "The privacy rules in force (the workflow's Provider Privacy setting and your OpenRouter privacy settings) leave no provider for this model.",
+      next: "Pick a model they allow with the `aimodels` keyword (add #imagegen for image models), or loosen Provider Privacy in the workflow's Configuration or the policy in your OpenRouter privacy settings.",
     };
   }
   switch (status.status) {

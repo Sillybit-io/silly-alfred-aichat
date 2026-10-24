@@ -4,14 +4,16 @@ import { basename, join, resolve } from "node:path";
 const SHEBANG = "#!/usr/bin/osascript -l JavaScript";
 const RUN_HANDLER = "function run(argv) { return __aichat_main(argv); }";
 
-type Options = { entries: string; out: string };
+// A release build removes the test hooks (see src/core/hooks.ts); --dev keeps them for local runs against a fake server.
+type Options = { entries: string; out: string; release?: boolean };
 
 function parseArgs(argv: string[]): Options {
-  const options: Options = { entries: "src/entries", out: "Workflow" };
+  const options: Options = { entries: "src/entries", out: "Workflow", release: true };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--entries") options.entries = argv[++i] ?? options.entries;
     else if (arg === "--out") options.out = argv[++i] ?? options.out;
+    else if (arg === "--dev") options.release = false;
     else throw new Error(`unknown argument ${arg}`);
   }
   return options;
@@ -32,6 +34,7 @@ export async function buildEntries(root: string, options: Options): Promise<stri
       format: "iife",
       target: "browser",
       minify: false,
+      define: { __AICHAT_RELEASE__: options.release === false ? "false" : "true" },
     });
     if (!result.success || result.outputs.length !== 1) {
       throw new Error(`build failed for ${file}:\n${result.logs.map(String).join("\n")}`);

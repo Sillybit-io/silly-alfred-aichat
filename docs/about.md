@@ -9,7 +9,7 @@ Chat with any OpenRouter model from Alfred, without installing anything.
 - `aimodels` searches the model list. ↩ uses a model in this chat, ⌘↩ makes it the default, ⌥↩ adds a favorite, ⌃↩ copies its id.
 - Select text and use **AI Chat: Ask about this text** or **AI Chat: Summarize**, **AI Chat: Translate** and the other preset actions, or **AI Chat: Run a preset…**, or type `aipresets`, to run a prompt preset. Edit `presets.json` from the first list to add your own.
 - `aiimage` generates images; `/image` does the same inside a chat.
-- On a chat in the list: ↩ opens it, ⌘↩ archives, ⌥↩ pins, ⌃↩ moves it to the Trash. **All chats…** opens the full list.
+- On a chat in the list: ↩ opens it, ⌘↩ archives, ⌥↩ pins, ⌃↩ deletes it permanently after a confirmation. **All chats…** opens the full list.
 
 ## Set it up
 

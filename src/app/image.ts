@@ -2,7 +2,7 @@ import { imageBody, imageMarkdown, parseImagePrompt } from "../core/imagegen";
 import { apiBase } from "../core/payload";
 import { collectFinalizers, readConfig, type Config } from "../features/index";
 import type { Host } from "../host/types";
-import { listImages } from "../store/images";
+import { imagesFolder, listImages } from "../store/images";
 import { admit, advance, currentRecord, finalizeDue, stop, type Finalizers, type RequestRecord } from "../store/requests";
 import { getSettings } from "../store/settings";
 import { imageError, viewJson } from "./view";
@@ -21,10 +21,11 @@ function idle(host: Host, config: Config, notice?: string): string {
     mode: "replace",
     requestId: "",
     stage: "",
+    imageRoots: [imagesFolder(host, config)],
   });
 }
 
-function live(host: Host, record: RequestRecord): string {
+function live(host: Host, config: Config, record: RequestRecord): string {
   const elapsed = Math.max(0, Math.floor((host.nowMs() - record.startedAt) / 1000));
   return viewJson({
     response: `# 🎨 ${record.draft.text}\n\n_Generating image…_`,
@@ -33,10 +34,11 @@ function live(host: Host, record: RequestRecord): string {
     requestId: record.id,
     stage: "",
     rerun: 0.1,
+    imageRoots: [imagesFolder(host, config)],
   });
 }
 
-function finished(record: RequestRecord, files: string[], failure: string | null): string {
+function finished(host: Host, config: Config, record: RequestRecord, files: string[], failure: string | null): string {
   const parts = [`# 🎨 ${record.draft.text}`];
   if (files.length > 0) parts.push(files.map(imageMarkdown).join("\n\n"));
   else {
@@ -50,6 +52,7 @@ function finished(record: RequestRecord, files: string[], failure: string | null
     mode: "replace",
     requestId: "",
     stage: "",
+    imageRoots: [imagesFolder(host, config)],
   });
 }
 
@@ -69,15 +72,15 @@ export function main(host: Host, argv: string[]): string {
   if (rid !== "") {
     const step = advance(host, rid, finalizers);
     if (!step.tick) return idle(host, config);
-    if (!step.tick.terminal) return live(host, step.tick.record);
+    if (!step.tick.terminal) return live(host, config, step.tick.record);
     const outcome = filesOf(step.finalize?.record ?? null);
-    return finished(step.tick.record, outcome.files, outcome.failure);
+    return finished(host, config, step.tick.record, outcome.files, outcome.failure);
   }
 
   finalizeDue(host, finalizers, LANE);
   const open = currentRecord(host, LANE);
   if (open && !open.final && open.state === "open") {
-    if (typed === "") return live(host, open);
+    if (typed === "") return live(host, config, open);
     stop(host, open.id);
     advance(host, open.id, finalizers);
   }
@@ -87,7 +90,7 @@ export function main(host: Host, argv: string[]): string {
   if (!parsed.ok) return idle(host, config, parsed.message);
   const modelId = parsed.request.model ?? (config.imageModel !== "" ? config.imageModel : (getSettings(host).lastModel ?? ""));
   if (modelId === "") return idle(host, config, "Choose an image model first: set Image Model in the workflow's Configuration, or add `--model <id>`.");
-  if (config.apiKey === "") return idle(host, config, "Add your OpenRouter API key in the workflow's Configuration first.");
+  if (config.apiKey === "") return idle(host, config, config.keyIssue ?? "Add your OpenRouter API key in the workflow's Configuration first.");
   const result = admit(
     host,
     {
@@ -107,5 +110,5 @@ export function main(host: Host, argv: string[]): string {
   );
   if (!result.ok) return idle(host, config, "An image is still being generated.");
   const record = currentRecord(host, LANE);
-  return record ? live(host, record) : idle(host, config);
+  return record ? live(host, config, record) : idle(host, config);
 }

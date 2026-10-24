@@ -50,10 +50,13 @@ export function saveImages(host: Host, config: Config, bodyText: string, prompt:
       host.writeAtomic(temp, image.bytes);
       host.move(temp, `${folder}/${name}`);
       saved.push(`${folder}/${name}`);
-      try {
-        host.runSync(["/usr/bin/xattr", "-w", XATTR_FIELD, xattrPlist(prompt), `${folder}/${name}`], { timeoutMs: 10000 });
-      } catch {
-        // the prompt is only metadata; the image is already saved
+      // The prompt travels with the file when it is shared and Spotlight indexes it, so it is saved only on request.
+      if (config.savePrompts) {
+        try {
+          host.runSync(["/usr/bin/xattr", "-w", XATTR_FIELD, xattrPlist(prompt), `${folder}/${name}`], { timeoutMs: 10000 });
+        } catch {
+          // the prompt is only metadata; the image is already saved
+        }
       }
     }
   } catch (error) {

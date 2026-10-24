@@ -1,6 +1,7 @@
 import { normalizeModel, type ModelRecord } from "../core/capabilities";
 import { lastStatus, mapCurlExit } from "../core/errors";
 import { apiBase } from "../core/payload";
+import { curlBinary, curlProtocolArgs } from "../host/common";
 import type { Host } from "../host/types";
 import { cacheDir } from "./chats";
 
@@ -29,14 +30,12 @@ const files = (host: Host) => ({
 const failedAt = (host: Host) => `${transportDir(host)}/failed-at`;
 const startedAt = (host: Host) => `${transportDir(host)}/started-at`;
 
-function curl(host: Host): string {
-  return host.env.aichat_curl ?? "/usr/bin/curl";
-}
-
 // output_modalities=all keeps image-generation models, which the default text-only list omits.
 function curlArgs(host: Host, extra: string[]): string[] {
+  const url = `${apiBase(host.env)}/models?output_modalities=all`;
   return [
-    curl(host),
+    curlBinary(host.env),
+    ...curlProtocolArgs(url),
     "-o",
     part(host),
     "-D",
@@ -46,7 +45,7 @@ function curlArgs(host: Host, extra: string[]): string[] {
     "--connect-timeout",
     "10",
     ...extra,
-    `${apiBase(host.env)}/models?output_modalities=all`,
+    url,
   ];
 }
 

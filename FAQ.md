@@ -46,7 +46,25 @@ Every image in the part of the chat that is sent has to be readable by the model
 
 ## Where is my data?
 
-Chats, presets, and attachments are plain files in the workflow's data folder (`~/Library/Application Support/Alfred/Workflow Data/com.sillybit.aichat`). Deleted chats go to the Trash. Your API key is stored by Alfred in the workflow's configuration and sent only to OpenRouter. The workflow has no analytics and never downloads code.
+Chats, presets, and attachments are plain, unencrypted files in the workflow's data folder (`~/Library/Application Support/Alfred/Workflow Data/com.sillybit.aichat`), and a cache sits in the matching Caches folder. Both are readable only by you (folders `700`, files `600`); the first run after an update tightens what an earlier version wrote. macOS already keeps `~/Library` closed to other users, so this is a second layer for the case that a folder is shared, copied, or backed up. An administrator can still read everything; only FileVault protects a disk that is read offline.
+
+Deleting a chat (⌃↩ in the lists, after a confirmation) or letting retention remove one erases its folder at once. It does not go to the Trash. That is not a secure erase: macOS has no secure erase for flash storage (Apple removed Secure Empty Trash for that reason), and FileVault is what keeps deleted data unreadable.
+
+Your API key is stored by Alfred in the workflow's preferences, unencrypted, like every Alfred workflow setting. The workflow leaves it out of exported copies and of the packaged release, and gives it to `curl` on standard input so it never appears in a command line. The workflow has no analytics and never downloads code.
+
+## What leaves my Mac?
+
+Each message goes to OpenRouter over https (and nowhere else) with the last messages of the chat as context and any attachments. OpenRouter passes it to the model provider. Two features send extra requests that carry chat text: the automatic title (the first messages) and the web follow-up rewrite (the chat so far, only with web search on). Both can be turned off in the configuration. Presets send the text you run them on to the model, as you would expect. Web search and PDF parsing are OpenRouter plugins with their own handling of your text.
+
+The configuration's **Provider Privacy** adds `data_collection: deny` (the default) or `zdr: true` to every chat request, which restricts routing as OpenRouter documents. It cannot cover plugins, and OpenRouter always keeps request metadata, such as how long a request took. Prompt logging at OpenRouter is opt-in, so check that it is off in your OpenRouter privacy settings. Image generation has no such request option and follows your OpenRouter privacy settings.
+
+## Why does a reply show "image not loaded"?
+
+A reply, a web page it read, or an attached document can contain Markdown or HTML that makes a viewer fetch an address, and the address can carry your conversation. That is a known way to leak data from a chat. The workflow never lets the view fetch anything a model chose: an image is shown as the text `🖼 image not loaded: <address>` so you can see where it pointed, HTML tags are shown as text, and links other than `https` are shown as text followed by their address. Links that stay get the site name after them and lose tracking parameters such as `utm_source`. Copies and exports are cleaned the same way. Only the pictures the workflow saved itself, in the images folder, are shown; if the folder path contains `[`, `]`, `?`, or `#`, they show as a path instead.
+
+## Can Spotlight or Time Machine see my chats?
+
+The workflow cannot stop them. An empty `.metadata_never_index` file no longer works inside a folder on recent macOS, and Alfred decides where the data folder is. To keep Spotlight out, add the data folder to System Settings, Spotlight, Search Privacy. To keep it out of backups, run `tmutil addexclusion -p "$HOME/Library/Application Support/Alfred/Workflow Data/com.sillybit.aichat"`. Generated images are saved in your Pictures folder, which both of them cover. They carry no prompt unless you turn on **Image Prompts** in the configuration.
 
 ## Why is there no spending display?
 
@@ -60,10 +78,6 @@ Open the workflow in Alfred Preferences and click the bug icon to open the debug
 
 Change it in the configuration. Every keyword is a field there, so no file edit is needed. The configuration also has an optional Chat Alias Keyword: put `chat` there if you want the shorter word as well.
 
-## Where do the source icons come from?
-
-Source icons are off by default; the Sources setting turns them on. Alfred cannot make an icon itself a link, so with the setting on each icon sits before its own link. The first time a reply cites a site, the workflow then downloads that site's icon from DuckDuckGo's icon service; only the site's domain is sent. Only public website names are looked up, never IP addresses or local names. The download must be a small PNG, ICO, GIF, or JPEG (SVG, HTML, and anything larger than 64 KB are discarded), and it is re-encoded as a 32 px PNG with macOS's own `sips` before it is ever shown. Icons are cached for 30 days in the workflow's cache folder. If an icon is missing, the link is shown without it.
-
 ## Image generation says my data policy blocks the model
 
-OpenRouter privacy settings such as zero data retention can leave no provider for some models. The workflow's default image model, `krea/krea-2-medium-turbo`, was chosen because it is on OpenRouter's zero-data-retention list. If you still see the message, pick another image model with `aimodels #imagegen`, or relax the policy in your OpenRouter privacy settings.
+The workflow's Provider Privacy setting (no data collection by default) and OpenRouter privacy settings such as zero data retention can leave no provider for some models. For chats, choose **Standard** in Provider Privacy or another model. The workflow's default image model, `krea/krea-2-medium-turbo`, was chosen because it is on OpenRouter's zero-data-retention list. If you still see the message, pick another image model with `aimodels #imagegen`, or relax the policy in your OpenRouter privacy settings.

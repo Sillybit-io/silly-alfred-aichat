@@ -1,8 +1,10 @@
 import { getModel } from "../store/catalog";
 import { describeFailure } from "../core/errors";
 import { buildBody, chatUrl, encodeBody, type ContextTurn, type PayloadOptions } from "../core/payload";
+import { sanitizeMarkdown } from "../core/sanitize";
 import { fillPrompt, type Preset } from "../core/presets";
 import { readConfig, FALLBACK_MODEL, type Config } from "../features/index";
+import { CURL_STDIN_CONFIG, curlAuthConfig, curlBinary, curlProtocolArgs } from "../host/common";
 import type { Host } from "../host/types";
 import { cacheDir } from "../store/chats";
 import { loadPresets } from "../store/presets";
@@ -50,27 +52,30 @@ function request(host: Host, config: Config, preset: Preset, prompt: string): Re
     web: preset.web ?? false,
     webMaxResults: config.webMaxResults,
     effort: preset.think === undefined ? null : preset.think === "off" ? "none" : preset.think,
+    privacy: config.privacy,
   };
   const folder = `${cacheDir(host)}/preset-${host.randomId()}`;
   host.mkdirp(folder);
   try {
     host.writeAtomic(`${folder}/body.json`, encodeBody(buildBody(turns, options)));
+    const url = chatUrl(host.env);
     const run = host.runSync(
       [
-        host.env.aichat_curl ?? "/usr/bin/curl",
+        curlBinary(host.env),
+        ...curlProtocolArgs(url),
         "-o", `${folder}/out`,
         "-D", `${folder}/headers`,
         "--silent", "--show-error",
         "--connect-timeout", "15",
         "--max-time", String(MAX_TIME_SECONDS),
+        ...CURL_STDIN_CONFIG,
         "-H", "Content-Type: application/json",
-        "-H", `Authorization: Bearer ${config.apiKey}`,
         "-H", `HTTP-Referer: ${REFERER}`,
         "-H", "X-Title: Alfred AI Chat",
         "--data-binary", `@${folder}/body.json`,
-        chatUrl(host.env),
+        url,
       ],
-      { timeoutMs: (MAX_TIME_SECONDS + 15) * 1000 },
+      { timeoutMs: (MAX_TIME_SECONDS + 15) * 1000, stdin: curlAuthConfig(config.apiKey) },
     );
     const read = (name: string) => (host.exists(`${folder}/${name}`) ? host.readText(`${folder}/${name}`) : "");
     const body = read("out");
@@ -103,12 +108,12 @@ export function main(host: Host, argv: string[]): string {
   if (preset.output === "textview") {
     return envelope(prompt, { preset_output: "textview", session_action: "new", preset_error: "" });
   }
-  if (config.apiKey === "") return fail("Add your OpenRouter API key in the workflow's Configuration first.");
+  if (config.apiKey === "") return fail(config.keyIssue ?? "Add your OpenRouter API key in the workflow's Configuration first.");
   const result = request(host, config, preset, prompt);
   if (!result.ok) return fail(result.message);
   saveLastResult(host, preset.name, result.reply);
   // Copying and pasting change the clipboard and close Alfred, so they are a setting. Without it the
   // reply is shown in a view, and ⌘↩ there copies it.
   const output = (preset.output === "clipboard" || preset.output === "paste") && !config.presetClipboard ? "view" : preset.output;
-  return envelope(output === "view" ? "" : result.reply, { preset_output: output, preset_error: "" });
+  return envelope(output === "view" ? "" : sanitizeMarkdown(result.reply), { preset_output: output, preset_error: "" });
 }

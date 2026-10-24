@@ -1,7 +1,18 @@
+import { TEST_HOOKS } from "./hooks";
 import { acceptsFile, efforts, type ModelRecord } from "./capabilities";
 import type { Annotation } from "./stream";
 
 export type PdfEngine = "auto" | "free" | "ocr" | "native";
+
+// standard: any provider the account allows. deny: only providers that do not store or train on prompts.
+// zdr: only zero-data-retention endpoints. Sent with every chat request; the image API has no such field.
+export type PrivacyMode = "standard" | "deny" | "zdr";
+
+export function providerPreferences(mode: PrivacyMode): Record<string, unknown> | null {
+  if (mode === "zdr") return { data_collection: "deny", zdr: true };
+  if (mode === "deny") return { data_collection: "deny" };
+  return null;
+}
 
 export type AttachmentPart = {
   kind: "image" | "file";
@@ -26,12 +37,13 @@ export type PayloadOptions = {
   webMaxResults?: number;
   effort?: string | null;
   excludeReasoning?: boolean;
+  privacy: PrivacyMode;
 };
 
 export const DEFAULT_API_BASE = "https://openrouter.ai/api/v1";
 
 export function apiBase(env: Record<string, string | undefined>): string {
-  const configured = (env.aichat_api_base ?? "").trim();
+  const configured = TEST_HOOKS ? (env.aichat_api_base ?? "").trim() : "";
   return (configured === "" ? DEFAULT_API_BASE : configured).replace(/\/+$/, "");
 }
 
@@ -115,6 +127,8 @@ export function buildBody(turns: ContextTurn[], options: PayloadOptions): Json {
   if (plugins.length > 0) body.plugins = plugins;
   const reasoning = reasoningFor(options);
   if (reasoning) body.reasoning = reasoning;
+  const provider = providerPreferences(options.privacy);
+  if (provider) body.provider = provider;
   return body;
 }
 
