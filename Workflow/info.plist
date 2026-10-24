@@ -3920,7 +3920,7 @@ This workflow borrows the streaming Text View pattern from the OpenAI workflow b
       <string>openrouter_api_key</string>
     </array>
     <key>version</key>
-    <string>0.1.0</string>
+    <string>0.1.1</string>
     <key>webaddress</key>
     <string>https://github.com/Sillybit-io/silly-alfred-aichat</string>
   </dict>

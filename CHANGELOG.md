@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 0.1.1 — 2026-10-24
+
 **Security and privacy**
 
 - The API key reaches `curl` on standard input (`-K -`), so it is no longer in any command line, and the long-running request does not inherit it in its environment. A key with a line break or control character is refused with a clear message.
