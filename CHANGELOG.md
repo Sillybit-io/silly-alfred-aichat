@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 0.1.2 — 2026-10-25
+
 **Faster**
 
 - A streaming reply no longer starts a `ps` process or reads the whole model list on every update, and its saved state is written only when something arrived.
