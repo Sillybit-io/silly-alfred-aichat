@@ -1,5 +1,4 @@
 import { MAX_BODY_BYTES, megabytes } from "../core/attachments";
-import { encodeBase64 } from "../core/base64";
 import { formatSize } from "../core/transcript";
 import type { AttachmentPart, ContextTurn } from "../core/payload";
 import { decodeUtf8 } from "../core/utf8";
@@ -11,24 +10,25 @@ import { modelCovers } from "./model";
 
 const PDF_ENGINES = ["auto", "free", "ocr", "native"];
 
-function snapshotBytes(ctx: PayloadContext, ref: AttachmentRef): Uint8Array | null {
-  const path = `${chatDir(ctx.host, ctx.chat.id)}/${ref.file}`;
-  return ctx.host.exists(path) ? ctx.host.readBytesFrom(path, 0) : null;
+// A file name cannot end the attribute or the tag it is written in.
+function attributeText(name: string): string {
+  return name.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-// Builds the parts for one turn from its snapshots; text files go into the message itself.
+// Builds the parts for one turn from its snapshots; text files go into the message itself. Images and PDFs are
+// read as base64 by the host, so their bytes never pass through JavaScript.
 function withAttachments(ctx: PayloadContext, turn: ContextTurn, refs: AttachmentRef[], needs: { image: boolean; file: boolean }): ContextTurn | string {
   const parts: AttachmentPart[] = [];
   let content = turn.content;
   for (const ref of refs) {
-    const bytes = snapshotBytes(ctx, ref);
-    if (bytes === null) return `The attachment **${ref.name}** is missing from this chat's saved files (${ref.file}), so nothing was sent. Remove it with \`/detach\` or attach it again.`;
+    const path = `${chatDir(ctx.host, ctx.chat.id)}/${ref.file}`;
+    if (!ctx.host.exists(path)) return `The attachment **${ref.name}** is missing from this chat's saved files (${ref.file}), so nothing was sent. Remove it with \`/detach\` or attach it again.`;
     if (ref.kind === "text") {
-      content += `\n\n<attached_file name="${ref.name}">\n${decodeUtf8(bytes)}\n</attached_file>`;
+      content += `\n\n<attached_file name="${attributeText(ref.name)}">\n${decodeUtf8(ctx.host.readBytesFrom(path, 0))}\n</attached_file>`;
     } else {
       if (ref.kind === "image") needs.image = true;
       else if (ctx.options.pdfEngine === "native") needs.file = true;
-      parts.push({ kind: ref.kind, name: ref.name, mime: ref.mime, base64: encodeBase64(bytes) });
+      parts.push({ kind: ref.kind, name: ref.name, mime: ref.mime, base64: ctx.host.readBase64(path) });
     }
   }
   return { ...turn, content, ...(parts.length > 0 ? { attachments: parts } : {}) };

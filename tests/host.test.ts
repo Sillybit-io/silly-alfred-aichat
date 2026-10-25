@@ -130,7 +130,8 @@ describe("supervised transport", () => {
   test("the supervisor argument vector carries the script and its files", () => {
     const argv = supervisorArgv(["curl", "x"], { pid: "p", exit: "e", stderr: "s" });
     expect(argv.slice(0, 4)).toEqual(["/bin/sh", "-c", SUPERVISOR_SCRIPT, "sh"]);
-    expect(argv.slice(4)).toEqual(["p", "e", "s", "", "curl", "x"]);
+    expect(argv.slice(4)).toEqual(["p", "e", "s", "", "", "curl", "x"]);
+    expect(supervisorArgv(["curl"], { pid: "p", exit: "e", stderr: "s", maxBytes: 1024 }).slice(4)).toEqual(["p", "e", "s", "", "3", "curl"]);
     expect(() => supervisorArgv([], { pid: "p", exit: "e", stderr: "s" })).toThrow();
   });
 });

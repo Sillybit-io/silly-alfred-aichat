@@ -39,11 +39,11 @@ describe("build", () => {
   }
 
   test("a release bundle ignores the test hooks: https, OpenRouter, and /usr/bin/curl only", async () => {
-    expect(await hooksOf(true)).toEqual({ base: "https://openrouter.ai/api/v1", curl: "/usr/bin/curl", proto: ["--proto", "=https", "--proto-redir", "=https"] });
+    expect(await hooksOf(true)).toEqual({ base: "https://openrouter.ai/api/v1", curl: "/usr/bin/curl", proto: ["--proto", "=https", "--proto-redir", "=https", "--tlsv1.2"] });
   });
 
   test("a dev bundle keeps them, and still follows redirects to https only", async () => {
-    expect(await hooksOf(false)).toEqual({ base: "http://127.0.0.1:9/v1", curl: "/tmp/fake-curl", proto: ["--proto", "=http,https", "--proto-redir", "=https"] });
+    expect(await hooksOf(false)).toEqual({ base: "http://127.0.0.1:9/v1", curl: "/tmp/fake-curl", proto: ["--proto", "=http,https", "--proto-redir", "=https", "--tlsv1.2"] });
   });
 
   test("the committed Workflow bundles are release builds", () => {

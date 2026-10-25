@@ -283,7 +283,7 @@ function fields(): ConfigField[] {
     { variable: "reasoning_default", label: "Reasoning Effort", type: "popupbutton", default: "model", pairs: [["Model default", "model"], ["Off", "off"], ["Low", "low"], ["Medium", "medium"], ["High", "high"]] },
     { variable: "keep_reasoning", label: "Reasoning", type: "checkbox", default: false, text: "Keep the reasoning under each reply" },
     { variable: "preset_clipboard", label: "Preset Results", type: "checkbox", default: false, text: "Let presets copy or paste their result (otherwise it is shown, and ⌘↩ copies it)" },
-    { variable: "auto_titles", label: "Titles", type: "checkbox", default: true, text: "Name new chats automatically" },
+    { variable: "auto_titles", label: "Titles", type: "checkbox", default: true, text: "Name new chats automatically with one small extra request (it carries the first message and reply)" },
     { variable: "title_model", label: "Title Model", type: "textfield", default: "anthropic/claude-haiku-5.5", placeholder: "vendor/model" },
     { variable: "translate_language", label: "Translate Language", type: "textfield", default: "English", description: "The language the Translate preset writes in." },
     { variable: "export_folder", label: "Export Folder", type: "textfield", default: "~/Documents/AI Chat", description: "Where /export saves Markdown files." },

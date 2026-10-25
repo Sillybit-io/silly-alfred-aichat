@@ -132,21 +132,37 @@ describe("CI workflows", () => {
     expect(Object.keys(release.on)).toEqual(["workflow_dispatch"]);
     expect(release.on.workflow_dispatch.inputs.bump).toMatchObject({ type: "choice", default: "auto", options: ["auto", "patch", "minor", "major"] });
     expect(release.concurrency["cancel-in-progress"]).toBe(false);
-    const job = release.jobs.release;
-    expect(job.if).toBe("github.ref == 'refs/heads/main'");
-    expect(job.permissions).toEqual({ contents: "write" });
-    expect(job.env.GH_TOKEN).toBe("${{ secrets.GITHUB_TOKEN }}");
-    const commands = runs(job);
+    expect(release.permissions).toEqual({});
+    const { build, publish } = release.jobs;
+    expect(Object.keys(release.jobs).sort()).toEqual(["build", "publish"]);
+    for (const job of [build, publish]) expect(job.if).toBe("github.ref == 'refs/heads/main'");
+    expect(build.permissions).toEqual({ contents: "read" });
+    expect(build.steps[0]).toMatchObject({ with: { "persist-credentials": false } });
+    expect(build.env?.GH_TOKEN).toBeUndefined();
+    const commands = runs(build);
     expect(commands.slice(0, 7)).toEqual(runs(ci.jobs.test).slice(0, 7));
-    const order = ["bun run bump \"$kind\"", "bun run package", 'bun run release:check "$RELEASE_TAG" --no-qa', "sha256sum", "git push origin HEAD:main", "gh release create"].map((word) => commands.findIndex((command: string) => command.includes(word)));
+    const order = ["bun run bump \"$kind\"", "bun run package", 'bun run release:check "$RELEASE_TAG" --no-qa', "sha256sum"].map((word) => commands.findIndex((command: string) => command.includes(word)));
     expect(order.every((position: number) => position >= 0)).toBe(true);
     expect([...order].sort((x: number, y: number) => x - y)).toEqual(order);
-    expect(commands.find((command: string) => command.includes("gh release create"))).toBe('gh release create "$RELEASE_TAG" dist/AI-Chat.alfredworkflow dist/AI-Chat.alfredworkflow.sha256 --target "$(git rev-parse HEAD)" --title "AI Chat $RELEASE_TAG" --notes-file dist/notes.md');
-    const uses = job.steps.map((step: any) => step.uses).filter(Boolean);
-    expect(uses.every((u: string) => /^(actions\/checkout|oven-sh\/setup-bun)@[0-9a-f]{40}$/.test(u))).toBe(true);
     const sums = commands.find((command: string) => command.includes("sha256sum"));
     expect(sums).toContain("AI-Chat.alfredworkflow.sha256");
     expect(sums).toContain(">> dist/notes.md");
+    const upload = build.steps.find((step: any) => String(step.uses).startsWith("actions/upload-artifact@"));
+    expect(upload.with.path.split("\n").filter(Boolean)).toEqual(["dist/AI-Chat.alfredworkflow", "dist/AI-Chat.alfredworkflow.sha256", "dist/notes.md", "package.json", "CHANGELOG.md", "Workflow/info.plist"]);
+
+    // The job that can write runs no project code: no bun, nothing installed, only git and gh on the built files.
+    expect(publish.needs).toBe("build");
+    expect(publish.permissions).toEqual({ contents: "write", "id-token": "write", attestations: "write" });
+    expect(publish.env.GH_TOKEN).toBe("${{ secrets.GITHUB_TOKEN }}");
+    expect(publish.env.RELEASE_TAG).toBe("${{ needs.build.outputs.tag }}");
+    const published = runs(publish);
+    expect(published.some((command: string) => /\bbun\b|npm|install/.test(command))).toBe(false);
+    expect(published.findIndex((c: string) => c.includes("git push origin HEAD:main"))).toBeLessThan(published.findIndex((c: string) => c.includes("gh release create")));
+    expect(published.find((command: string) => command.includes("gh release create"))).toBe('gh release create "$RELEASE_TAG" dist/AI-Chat.alfredworkflow dist/AI-Chat.alfredworkflow.sha256 --target "$(git rev-parse HEAD)" --title "AI Chat $RELEASE_TAG" --notes-file dist/notes.md');
+    const attest = publish.steps.find((step: any) => String(step.uses).startsWith("actions/attest-build-provenance@"));
+    expect(attest.with["subject-path"]).toBe("dist/AI-Chat.alfredworkflow");
+    const uses = [...build.steps, ...publish.steps].map((step: any) => step.uses).filter(Boolean);
+    expect(uses.every((u: string) => /^(actions\/(checkout|upload-artifact|download-artifact|attest-build-provenance)|oven-sh\/setup-bun)@[0-9a-f]{40}$/.test(u))).toBe(true);
   });
 
   test("every action in every workflow is pinned to a full commit SHA, and Dependabot keeps them current", () => {

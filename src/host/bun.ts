@@ -5,6 +5,7 @@ import {
   fstatSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readdirSync,
   readFileSync,
@@ -16,8 +17,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, join } from "node:path";
-import { commandFromPs, isSafePid, killArgv, psArgv, redact, scrubbedEnv, supervisorArgv } from "./common";
-import type { ChooseFilesOptions, ChooseFilesResult, FileStat, Host, RunResult, SupervisorFiles } from "./types";
+import { tmpdir } from "node:os";
+import { boundedCommandArgv, boundedRunResult, commandFromPs, isSafePid, killArgv, psArgv, redact, scrubbedEnv, supervisorArgv } from "./common";
+import type { ChooseFilesOptions, ChooseFilesResult, FileStat, Host, RunOptions, RunResult, SupervisorFiles } from "./types";
 
 export type FakeCommand = (args: string[], stdin?: string) => RunResult;
 
@@ -47,12 +49,12 @@ export class BunHost implements Host {
     return readFileSync(path, "utf8");
   }
 
-  readBytesFrom(path: string, offset: number): Uint8Array {
+  readBytesFrom(path: string, offset: number, maxLength = Infinity): Uint8Array {
     const fd = openSync(path, "r");
     try {
       const size = fstatSync(fd).size;
-      if (offset >= size) return new Uint8Array(0);
-      const buffer = new Uint8Array(size - offset);
+      if (offset >= size || maxLength <= 0) return new Uint8Array(0);
+      const buffer = new Uint8Array(Math.min(size - offset, maxLength));
       let read = 0;
       while (read < buffer.length) {
         const n = readSync(fd, buffer, read, buffer.length - read, offset + read);
@@ -63,6 +65,10 @@ export class BunHost implements Host {
     } finally {
       closeSync(fd);
     }
+  }
+
+  readBase64(path: string): string {
+    return readFileSync(path).toString("base64");
   }
 
   writeAtomic(path: string, data: Uint8Array | string): void {
@@ -132,6 +138,14 @@ export class BunHost implements Host {
     }
   }
 
+  changedMs(path: string): number | null {
+    try {
+      return statSync(path).ctimeMs;
+    } catch {
+      return null;
+    }
+  }
+
   listDir(path: string): string[] {
     return readdirSync(path);
   }
@@ -161,10 +175,31 @@ export class BunHost implements Host {
     }
   }
 
-  runSync(argv: string[], options: { timeoutMs?: number; stdin?: string } = {}): RunResult {
+  runSync(argv: string[], options: RunOptions = {}): RunResult {
     this.calls.push(argv);
     const fake = this.options.fakeCommands?.[basename(argv[0] ?? "")];
     if (fake) return fake(argv.slice(1), options.stdin);
+    if (options.maxBytes !== undefined) {
+      const command = boundedCommandArgv(argv, options.maxBytes);
+      const folder = mkdtempSync(join(tmpdir(), "aichat-run-"));
+      const out = join(folder, "out");
+      const err = join(folder, "err");
+      const handles: number[] = [];
+      try {
+        const stdout = openSync(out, "wx", 0o600);
+        handles.push(stdout);
+        const stderr = openSync(err, "wx", 0o600);
+        handles.push(stderr);
+        const result = Bun.spawnSync(command, {
+          stdin: options.stdin === undefined ? "ignore" : Buffer.from(options.stdin),
+          stdout, stderr, env: scrubbedEnv(this.env), timeout: options.timeoutMs,
+        });
+        return boundedRunResult(this, out, err, result.exitedDueToTimeout ? 124 : (result.exitCode ?? 1), options.maxBytes);
+      } finally {
+        for (const handle of handles) closeSync(handle);
+        rmSync(folder, { recursive: true, force: true });
+      }
+    }
     const result = Bun.spawnSync(argv, {
       stdin: options.stdin === undefined ? "ignore" : Buffer.from(options.stdin),
       stdout: "pipe",

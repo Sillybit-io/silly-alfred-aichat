@@ -1,17 +1,17 @@
 import { baseName, classifyName, looksLikeText, MAX_FILE_BYTES, MAX_PENDING, megabytes, type Classified } from "../core/attachments";
 import { sha256Hex } from "../core/sha256";
-import { decodeUtf8 } from "../core/utf8";
 import type { Config } from "../features/index";
 import type { Host } from "../host/types";
 import { attachmentsDir, cacheDir, mutateChat, type AttachmentRef } from "./chats";
 
 export type AttachResult = { added: AttachmentRef[]; errors: string[] };
 
-type Source = { name: string; bytes: Uint8Array; classified: Classified };
+// temp is a file of ours that holds exactly these bytes; the snapshot moves it into place instead of writing them again.
+type Source = { name: string; bytes: Uint8Array; classified: Classified; temp?: string };
 
 // Large PNG and JPEG screenshots cost tokens without adding detail: sips writes a smaller temporary
 // copy and the source file is left alone. GIF and WebP are sent as they are.
-function downscaled(host: Host, config: Config, path: string, classified: Classified): Uint8Array | null {
+function downscaled(host: Host, config: Config, path: string, classified: Classified): { bytes: Uint8Array; temp: string } | null {
   if (classified.kind !== "image" || (classified.ext !== "png" && classified.ext !== "jpg")) return null;
   let probe;
   try {
@@ -27,21 +27,32 @@ function downscaled(host: Host, config: Config, path: string, classified: Classi
   const temp = `${cacheDir(host)}/resize-${host.randomId()}.${classified.ext}`;
   try {
     const result = host.runSync(["/usr/bin/sips", "-Z", String(config.imageMaxEdge), path, "--out", temp], { timeoutMs: 30000 });
-    return result.exit === 0 && host.exists(temp) ? host.readBytesFrom(temp, 0) : null;
+    if (result.exit === 0 && host.exists(temp)) return { bytes: host.readBytesFrom(temp, 0), temp };
   } catch {
-    return null;
-  } finally {
-    host.remove(temp);
+    // the original is sent instead
   }
+  host.remove(temp);
+  return null;
 }
 
 function snapshot(host: Host, chatId: string, source: Source): AttachmentRef {
   const sha = sha256Hex(source.bytes);
   const file = `attachments/${sha}.${source.classified.ext}`;
   const dir = attachmentsDir(host, chatId);
-  host.mkdirExclusive(dir);
-  const target = `${dir}/${sha}.${source.classified.ext}`;
-  if (!host.exists(target)) host.writeAtomic(target, source.bytes);
+  try {
+    host.mkdirExclusive(dir);
+    const target = `${dir}/${sha}.${source.classified.ext}`;
+    if (!host.exists(target)) {
+      if (source.temp !== undefined) {
+        host.move(source.temp, target);
+        host.restrict(target);
+      } else {
+        host.writeAtomic(target, source.bytes);
+      }
+    }
+  } finally {
+    if (source.temp !== undefined) host.remove(source.temp);
+  }
   return {
     name: source.name,
     kind: source.classified.kind === "unknown" ? "text" : source.classified.kind,
@@ -60,16 +71,14 @@ function prepareOne(host: Host, config: Config, path: string): Source | string {
   // The size cap is checked before a single byte is read.
   if (info.size > MAX_FILE_BYTES) return `${name}: ${megabytes(info.size)} is over the 20 MB per-file cap`;
   const classified = classifyName(name);
-  let bytes = host.readBytesFrom(path, 0);
+  const bytes = host.readBytesFrom(path, 0);
   if (classified.kind === "unknown") {
     if (bytes.length > config.textAttachmentMaxKb * 1024) return `${name}: text files are limited to ${config.textAttachmentMaxKb} KB`;
     if (!looksLikeText(bytes)) return `${name}: this file type cannot be read; attach images, PDFs, or text files`;
-    decodeUtf8(bytes);
     return { name, bytes, classified: { kind: "unknown", ext: classified.ext, mime: "text/plain" } };
   }
   const smaller = downscaled(host, config, path, classified);
-  if (smaller) bytes = smaller;
-  return { name, bytes, classified };
+  return smaller ? { name, bytes: smaller.bytes, classified, temp: smaller.temp } : { name, bytes, classified };
 }
 
 // Reads each source once, snapshots it into the chat, and adds a pending ref under the chat lock.

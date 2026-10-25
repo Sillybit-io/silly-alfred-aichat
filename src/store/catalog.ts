@@ -1,7 +1,7 @@
 import { normalizeModel, type ModelRecord } from "../core/capabilities";
 import { lastStatus, mapCurlExit } from "../core/errors";
 import { apiBase } from "../core/payload";
-import { curlBinary, curlProtocolArgs } from "../host/common";
+import { curlBinary, curlProtocolArgs, MAX_RESPONSE_BYTES } from "../host/common";
 import type { Host } from "../host/types";
 import { cacheDir } from "./chats";
 
@@ -44,6 +44,8 @@ function curlArgs(host: Host, extra: string[]): string[] {
     "--show-error",
     "--connect-timeout",
     "10",
+    "--max-filesize",
+    String(MAX_RESPONSE_BYTES),
     ...extra,
     url,
   ];
@@ -77,6 +79,7 @@ function installDownload(host: Host, curlExit: number): { ok: true } | { ok: fal
   if (curlExit !== 0) return { ok: false, reason: mapCurlExit(curlExit).title };
   const status = lastStatus(readTrimmed(host, files(host).headers) ?? "");
   if (!status || status.status !== 200) return { ok: false, reason: `HTTP ${status ? status.status : "?"}` };
+  if ((host.stat(part(host))?.size ?? 0) > MAX_RESPONSE_BYTES) return { ok: false, reason: mapCurlExit(63).title };
   let body: unknown;
   try {
     body = JSON.parse(host.readText(part(host)));
@@ -123,7 +126,7 @@ export function ensureCatalog(host: Host): CatalogResult {
   let cache = loadCatalog(host);
   if (!cache) {
     clearTransport(host);
-    const run = host.runSync(curlArgs(host, ["--max-time", "10"]), { timeoutMs: 15000 });
+    const run = host.runSync(curlArgs(host, ["--max-time", "10"]), { timeoutMs: 15000, maxBytes: MAX_RESPONSE_BYTES });
     const result = installDownload(host, run.exit);
     clearTransport(host);
     if (!result.ok) return { models: [], note: `Could not load the model list (${result.reason})`, refreshing: false };
@@ -137,7 +140,7 @@ export function ensureCatalog(host: Host): CatalogResult {
     if (host.nowMs() - failed > RETRY_AFTER_FAILURE_MS) {
       clearTransport(host);
       host.writeAtomic(startedAt(host), String(host.nowMs()));
-      host.spawnSupervised(curlArgs(host, ["--max-time", "60"]), { pid: f.pid, exit: f.exit, stderr: f.stderr });
+      host.spawnSupervised(curlArgs(host, ["--max-time", "60"]), { pid: f.pid, exit: f.exit, stderr: f.stderr, maxBytes: MAX_RESPONSE_BYTES });
       refreshing = true;
     }
   }

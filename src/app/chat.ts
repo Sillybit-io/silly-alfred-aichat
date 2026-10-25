@@ -69,8 +69,7 @@ function footer(parts: string[]): string {
 }
 
 function footerFlagsFor(host: Host, config: Config, chat: Chat | null, modelId: string, record: RequestRecord | null): string[] {
-  const model = ensureModel(host, modelId);
-  const flags = collectFooterFlags({ host, config, chat, modelId, model, record });
+  const flags = collectFooterFlags({ host, config, chat, modelId, record });
   const notes = record && Array.isArray(record.meta.notes) ? (record.meta.notes as string[]) : [];
   return [...flags, ...notes];
 }

@@ -156,6 +156,14 @@ export function mapCurlExit(code: number): MappedError {
         detail: "OpenRouter closed the connection without answering.",
         next: "Use /retry.",
       };
+    // 153: the supervisor's file-size limit stopped curl (SIGXFSZ).
+    case 63:
+    case 153:
+      return {
+        title: "Reply too large",
+        detail: "OpenRouter sent more data than the workflow accepts for one reply.",
+        next: "Ask for a shorter answer or fewer images, then use /retry.",
+      };
     case 56:
       return {
         title: "Connection lost",

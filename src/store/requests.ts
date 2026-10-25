@@ -1,8 +1,9 @@
-import { describeFailure, lastStatus, type MappedError } from "../core/errors";
+import { describeFailure, lastStatus, mapCurlExit, type MappedError } from "../core/errors";
+import { decodeUtf8 } from "../core/utf8";
 import { newFramer, type FramerState } from "../core/sse";
 import { newStreamState, consume, type Annotation, type StreamState } from "../core/stream";
 import { newId } from "../core/ids";
-import { CURL_STDIN_CONFIG, curlAuthConfig, curlBinary, curlProtocolArgs } from "../host/common";
+import { CURL_STDIN_CONFIG, curlAuthConfig, curlBinary, curlProtocolArgs, MAX_IMAGE_RESPONSE_BYTES, MAX_RESPONSE_BYTES } from "../host/common";
 import type { Host } from "../host/types";
 import { dataDir, getChat, mutateChat, NotFoundError, type AttachmentRef } from "./chats";
 import { withLock } from "./lock";
@@ -147,11 +148,21 @@ function transportEnded(host: Host, record: RequestRecord): boolean {
   if (host.exists(files.exit)) return true;
   const pidText = readOptional(host, files.pid);
   if (pidText === null) return host.nowMs() - record.startedAt > NO_PID_YET_MS;
-  return ownedPid(host, record) === null && host.nowMs() - Math.max(record.lastGrowthAt, record.startedAt) > PID_GRACE_MS;
+  // The clock comes first: while bytes keep arriving, no process is spawned to look the pid up.
+  return host.nowMs() - Math.max(record.lastGrowthAt, record.startedAt) > PID_GRACE_MS && ownedPid(host, record) === null;
+}
+
+const responseLimit = (kind: RequestKind) => (kind === "image" ? MAX_IMAGE_RESPONSE_BYTES : MAX_RESPONSE_BYTES);
+
+// The saved response of a request that is not streamed, or "" when it is over its cap and must not be loaded.
+function responseText(host: Host, record: RequestRecord): string {
+  const files = transport(host, record.id);
+  const info = host.stat(files.out);
+  return info === null || info.size > responseLimit(record.kind) ? "" : (readOptional(host, files.out) ?? "");
 }
 
 function curlArgs(host: Host, input: AdmitInput, files: ReturnType<typeof transport>): string[] {
-  const args = [curlBinary(host.env), ...curlProtocolArgs(input.url), "-o", files.out, "-D", files.headers, "--silent", "--show-error", "--connect-timeout", "15"];
+  const args = [curlBinary(host.env), ...curlProtocolArgs(input.url), "-o", files.out, "-D", files.headers, "--silent", "--show-error", "--connect-timeout", "15", "--max-filesize", String(responseLimit(input.kind))];
   if (input.stream) args.push("--no-buffer", "--speed-limit", "1", "--speed-time", String(input.timeoutSeconds));
   else args.push("--max-time", String(input.timeoutSeconds));
   args.push(
@@ -227,7 +238,7 @@ export function admit(host: Host, input: AdmitInput, finalizers: Finalizers = {}
         if (!(error instanceof NotFoundError)) throw error;
       }
     }
-    host.spawnSupervised(curlArgs(host, input, files), { pid: files.pid, exit: files.exit, stderr: files.stderr, remove: files.body }, { stdin: authConfig });
+    host.spawnSupervised(curlArgs(host, input, files), { pid: files.pid, exit: files.exit, stderr: files.stderr, remove: files.body, maxBytes: responseLimit(input.kind) }, { stdin: authConfig });
     return { ok: true, rid } as const;
   });
 }
@@ -250,7 +261,7 @@ function hasImages(body: string): boolean {
 function failureFor(host: Host, record: RequestRecord, extra: { stalled?: boolean } = {}): MappedError {
   const files = transport(host, record.id);
   const status = record.httpStatus;
-  const body = status !== null && status >= 400 ? (readOptional(host, files.out) ?? "").slice(0, 4000) : "";
+  const body = status !== null && status >= 400 && host.exists(files.out) ? decodeUtf8(host.readBytesFrom(files.out, 0, 4000)) : "";
   if (extra.stalled) {
     return { title: "No data from OpenRouter", detail: `Nothing arrived for ${record.timeoutSeconds} seconds.`, next: "Use /retry, or pick another model with /model." };
   }
@@ -270,19 +281,37 @@ function tickUnlocked(host: Host, rid: string): TickResult | null {
   if (record.final || record.state !== "open") return { record, terminal: record.state !== "open" };
   const files = transport(host, rid);
   const now = host.nowMs();
+  const limit = responseLimit(record.kind);
+  let tooLarge = false;
+  // Set by every change to the record below, so a tick that found nothing new writes nothing, and a tick that did
+  // serializes the record once, however long the reply has grown.
+  let changed = false;
 
   if (host.exists(files.out)) {
-    const bytes = host.readBytesFrom(files.out, record.offset);
+    // One byte past the cap is enough to know the response is too large; nothing beyond it is read or kept.
+    const read = host.readBytesFrom(files.out, record.offset, limit - record.offset + 1);
+    tooLarge = record.offset + read.length > limit;
+    const bytes = tooLarge ? read.subarray(0, limit - record.offset) : read;
+    if (read.length > 0) {
+      record.lastGrowthAt = now;
+      changed = true;
+    }
     if (bytes.length > 0) {
       record.offset += bytes.length;
-      record.lastGrowthAt = now;
       if (record.stream) consume(record.framer, record.reducer, bytes);
     }
   }
   const headers = readOptional(host, files.headers);
-  if (headers !== null) record.httpStatus = lastStatus(headers)?.status ?? record.httpStatus;
+  const status = headers === null ? record.httpStatus : (lastStatus(headers)?.status ?? record.httpStatus);
+  if (status !== record.httpStatus) {
+    record.httpStatus = status;
+    changed = true;
+  }
   const exitText = readOptional(host, files.exit);
-  if (exitText !== null && Number.isFinite(Number(exitText.trim()))) record.curlExit = Number(exitText.trim());
+  if (exitText !== null && Number.isFinite(Number(exitText.trim())) && Number(exitText.trim()) !== record.curlExit) {
+    record.curlExit = Number(exitText.trim());
+    changed = true;
+  }
 
   const reducer = record.reducer;
   const hasContent = reducer.content !== "";
@@ -291,7 +320,10 @@ function tickUnlocked(host: Host, rid: string): TickResult | null {
   let stalled = false;
 
   if (host.exists(files.stop)) state = "stopped";
-  else if (httpFailed && record.curlExit !== null) state = "failed";
+  else if (tooLarge) {
+    state = record.stream && hasContent ? "interrupted" : "failed";
+    record.error = mapCurlExit(63);
+  } else if (httpFailed && record.curlExit !== null) state = "failed";
   else if (record.stream && reducer.error) state = hasContent ? "interrupted" : "failed";
   else if (record.stream && reducer.doneSeen) state = "done";
   else if (record.curlExit !== null || transportEnded(host, record)) {
@@ -299,7 +331,7 @@ function tickUnlocked(host: Host, rid: string): TickResult | null {
       state = hasContent ? "interrupted" : "failed";
     } else {
       state = record.curlExit === 0 && !httpFailed ? "done" : "failed";
-      if (state === "done" && record.kind === "image" && !hasImages(readOptional(host, files.out) ?? "")) {
+      if (state === "done" && record.kind === "image" && !hasImages(responseText(host, record))) {
         state = "failed";
         record.error = { title: "No image returned", detail: "OpenRouter answered without an image.", next: "Try again, or choose another image model." };
       }
@@ -312,12 +344,14 @@ function tickUnlocked(host: Host, rid: string): TickResult | null {
     state = "failed";
   }
 
+  // Only a terminal tick sets the state or an error.
   if (state !== "open") {
     if (state !== "done" && host.exists(files.pid) && record.curlExit === null) stopTransport(host, record);
     record.state = state;
     if ((state === "failed" || state === "interrupted") && !record.error) record.error = failureFor(host, record, { stalled });
+    changed = true;
   }
-  saveRecord(host, record);
+  if (changed) saveRecord(host, record);
   return { record, terminal: state !== "open" };
 }
 
@@ -338,7 +372,7 @@ function outcomeOf(host: Host, record: RequestRecord): Outcome {
     finishReason: record.reducer.finishReason,
     error: record.error,
     httpStatus: record.httpStatus,
-    bodyText: record.stream ? "" : (readOptional(host, files.out) ?? ""),
+    bodyText: record.stream ? "" : responseText(host, record),
   };
 }
 

@@ -143,6 +143,32 @@ ${host.nowMs()}`);
     clearCurrent(host);
     return null;
   }
+  var summaryCacheFile = (host) => `${cacheDir(host)}/summaries.json`;
+  var summaryCacheLock = (host) => `${cacheDir(host)}/.summaries.lock`;
+  function loadSummaryCache(host) {
+    try {
+      const parsed = JSON.parse(host.readText(summaryCacheFile(host)));
+      if (parsed.schema === 1 && typeof parsed.entries === "object" && parsed.entries !== null)
+        return { schema: 1, entries: parsed.entries };
+    } catch {}
+    return { schema: 1, entries: {} };
+  }
+  function saveSummaryCache(host, cache) {
+    try {
+      host.writeAtomic(summaryCacheFile(host), JSON.stringify(cache));
+    } catch {}
+  }
+  function forgetSummary(host, id) {
+    if (!host.env.alfred_workflow_cache || !host.exists(cacheDir(host)))
+      return;
+    withLock(host, summaryCacheLock(host), () => {
+      const cache = loadSummaryCache(host);
+      if (!Object.prototype.hasOwnProperty.call(cache.entries, id))
+        return;
+      delete cache.entries[id];
+      saveSummaryCache(host, cache);
+    });
+  }
 
   // src/app/view.ts
   function envelope(arg, variables) {
@@ -150,10 +176,11 @@ ${host.nowMs()}`);
   }
 
   // src/app/history-action.ts
+  var CHAT_ID = /^[0-9a-z]{1,64}$/;
   function applyHistoryAction(host, action, folderArg) {
     const id = baseName(folderArg.trim().replace(/\/+$/, ""));
     const gone = { next: "list", notice: "That chat no longer exists" };
-    if (id === "" || !getChat(host, id))
+    if (!CHAT_ID.test(id) || !getChat(host, id))
       return gone;
     try {
       if (action === "archive") {
@@ -179,6 +206,7 @@ ${host.nowMs()}`);
           host.log(`could not delete chat ${id}: ${String(error)}`);
           return { next: "list", notice: "The chat could not be deleted" };
         }
+        forgetSummary(host, id);
         if (getCurrent(host) === id)
           clearCurrent(host);
         return { next: "list", notice: "" };
@@ -198,46 +226,62 @@ ${host.nowMs()}`);
 
   // src/core/base64.ts
   var ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  var PAD = 61;
+  var CHUNK = 8190;
+  var CODES = Uint8Array.from(ALPHABET, (c) => c.charCodeAt(0));
   var LOOKUP = (() => {
-    const table = new Array(128).fill(-1);
+    const table = new Int8Array(128).fill(-1);
     for (let i = 0;i < ALPHABET.length; i++)
       table[ALPHABET.charCodeAt(i)] = i;
     return table;
   })();
-  function encodeBase64(bytes) {
+  function ascii(codes) {
     const parts = [];
-    for (let i = 0;i < bytes.length; i += 3) {
-      const a = bytes[i];
-      const b = i + 1 < bytes.length ? bytes[i + 1] : 0;
-      const c = i + 2 < bytes.length ? bytes[i + 2] : 0;
-      const chunk = a << 16 | b << 8 | c;
-      parts.push(ALPHABET[chunk >> 18 & 63] + ALPHABET[chunk >> 12 & 63] + (i + 1 < bytes.length ? ALPHABET[chunk >> 6 & 63] : "=") + (i + 2 < bytes.length ? ALPHABET[chunk & 63] : "="));
-    }
+    for (let i = 0;i < codes.length; i += CHUNK)
+      parts.push(String.fromCharCode.apply(null, codes.subarray(i, i + CHUNK)));
     return parts.join("");
   }
+  function encodeBase64(bytes) {
+    const out = new Uint8Array(Math.ceil(bytes.length / 3) * 4);
+    let o = 0;
+    let i = 0;
+    for (;i + 2 < bytes.length; i += 3) {
+      const chunk = bytes[i] << 16 | bytes[i + 1] << 8 | bytes[i + 2];
+      out[o++] = CODES[chunk >> 18 & 63];
+      out[o++] = CODES[chunk >> 12 & 63];
+      out[o++] = CODES[chunk >> 6 & 63];
+      out[o++] = CODES[chunk & 63];
+    }
+    const rest = bytes.length - i;
+    if (rest > 0) {
+      const chunk = bytes[i] << 16 | (rest > 1 ? bytes[i + 1] << 8 : 0);
+      out[o++] = CODES[chunk >> 18 & 63];
+      out[o++] = CODES[chunk >> 12 & 63];
+      out[o++] = rest > 1 ? CODES[chunk >> 6 & 63] : PAD;
+      out[o++] = PAD;
+    }
+    return ascii(out);
+  }
   function decodeBase64(text) {
-    const symbols = [];
+    const symbols = new Uint8Array(text.length);
+    let n = 0;
     for (let i = 0;i < text.length; i++) {
       const code = text.charCodeAt(i);
-      if (code === 61)
+      if (code === PAD)
         break;
       if (code === 10 || code === 13 || code === 32 || code === 9)
         continue;
       const value = code < 128 ? LOOKUP[code] : -1;
       if (value < 0)
         throw new Error(`invalid base64 character at ${i}`);
-      symbols.push(value);
+      symbols[n++] = value;
     }
-    if (symbols.length % 4 === 1)
+    if (n % 4 === 1)
       throw new Error("invalid base64 length");
-    const out = new Uint8Array(Math.floor(symbols.length * 3 / 4));
+    const out = new Uint8Array(Math.floor(n * 3 / 4));
     let o = 0;
-    for (let i = 0;i < symbols.length; i += 4) {
-      const s0 = symbols[i];
-      const s1 = symbols[i + 1];
-      const s2 = i + 2 < symbols.length ? symbols[i + 2] : 0;
-      const s3 = i + 3 < symbols.length ? symbols[i + 3] : 0;
-      const chunk = s0 << 18 | s1 << 12 | s2 << 6 | s3;
+    for (let i = 0;i < n; i += 4) {
+      const chunk = symbols[i] << 18 | symbols[i + 1] << 12 | (i + 2 < n ? symbols[i + 2] : 0) << 6 | (i + 3 < n ? symbols[i + 3] : 0);
       if (o < out.length)
         out[o++] = chunk >> 16 & 255;
       if (o < out.length)
@@ -248,10 +292,86 @@ ${host.nowMs()}`);
     return out;
   }
 
+  // src/core/utf8.ts
+  function continuation(bytes, index, low = 128, high = 191) {
+    return index < bytes.length && bytes[index] >= low && bytes[index] <= high;
+  }
+  function decodeUtf8(bytes) {
+    const parts = [];
+    let run = [];
+    const flush = () => {
+      if (run.length > 0) {
+        parts.push(String.fromCharCode(...run));
+        run = [];
+      }
+    };
+    const push = (codePoint) => {
+      if (codePoint > 65535) {
+        const offset = codePoint - 65536;
+        run.push(55296 + (offset >> 10), 56320 + (offset & 1023));
+      } else {
+        run.push(codePoint);
+      }
+      if (run.length >= 4096)
+        flush();
+    };
+    let i = 0;
+    while (i < bytes.length) {
+      const lead = bytes[i];
+      if (lead < 128) {
+        push(lead);
+        i += 1;
+      } else if (lead >= 194 && lead <= 223) {
+        if (continuation(bytes, i + 1)) {
+          push((lead & 31) << 6 | bytes[i + 1] & 63);
+          i += 2;
+        } else {
+          push(65533);
+          i += 1;
+        }
+      } else if (lead >= 224 && lead <= 239) {
+        const low = lead === 224 ? 160 : 128;
+        const high = lead === 237 ? 159 : 191;
+        if (!continuation(bytes, i + 1, low, high)) {
+          push(65533);
+          i += 1;
+        } else if (!continuation(bytes, i + 2)) {
+          push(65533);
+          i += 2;
+        } else {
+          push((lead & 15) << 12 | (bytes[i + 1] & 63) << 6 | bytes[i + 2] & 63);
+          i += 3;
+        }
+      } else if (lead >= 240 && lead <= 244) {
+        const low = lead === 240 ? 144 : 128;
+        const high = lead === 244 ? 143 : 191;
+        if (!continuation(bytes, i + 1, low, high)) {
+          push(65533);
+          i += 1;
+        } else if (!continuation(bytes, i + 2)) {
+          push(65533);
+          i += 2;
+        } else if (!continuation(bytes, i + 3)) {
+          push(65533);
+          i += 3;
+        } else {
+          push((lead & 7) << 18 | (bytes[i + 1] & 63) << 12 | (bytes[i + 2] & 63) << 6 | bytes[i + 3] & 63);
+          i += 4;
+        }
+      } else {
+        push(65533);
+        i += 1;
+      }
+    }
+    flush();
+    return parts.join("");
+  }
+
   // src/host/common.ts
   var SUPERVISOR_SCRIPT = [
     "umask 077",
-    "pid_file=$1; exit_file=$2; err_file=$3; remove_file=$4; shift 4",
+    "pid_file=$1; exit_file=$2; err_file=$3; remove_file=$4; max_blocks=$5; shift 5",
+    'if [ -n "$max_blocks" ]; then ulimit -f "$max_blocks" || exit 63; fi',
     "exec 3<&0",
     '"$@" <&3 >/dev/null 2>"$err_file" &',
     "child=$!",
@@ -266,7 +386,24 @@ ${host.nowMs()}`);
   function supervisorArgv(argv, files) {
     if (argv.length === 0)
       throw new Error("spawnSupervised needs a command");
-    return ["/bin/sh", "-c", SUPERVISOR_SCRIPT, "sh", files.pid, files.exit, files.stderr, files.remove ?? "", ...argv];
+    return ["/bin/sh", "-c", SUPERVISOR_SCRIPT, "sh", files.pid, files.exit, files.stderr, files.remove ?? "", maxBlocks(files.maxBytes), ...argv];
+  }
+  function maxBlocks(maxBytes) {
+    if (maxBytes !== undefined && (!Number.isSafeInteger(maxBytes) || maxBytes < 1))
+      throw new Error("maxBytes must be a positive safe integer");
+    return maxBytes === undefined ? "" : String(Math.ceil(maxBytes / 512) + 1);
+  }
+  function boundedCommandArgv(argv, maxBytes) {
+    if (argv.length === 0)
+      throw new Error("runSync needs a command");
+    return ["/bin/sh", "-c", 'umask 077; ulimit -f "$1" || exit 63; shift; exec "$@"', "sh", maxBlocks(maxBytes), ...argv];
+  }
+  function boundedRunResult(host, out, err, exit, maxBytes) {
+    const stdout = host.readBytesFrom(out, 0, maxBytes + 1);
+    const stderr = host.readBytesFrom(err, 0, maxBytes + 1);
+    if (stdout.length > maxBytes || stderr.length > maxBytes)
+      return { exit: 63, stdout: "", stderr: "" };
+    return { exit, stdout: decodeUtf8(stdout), stderr: decodeUtf8(stderr) };
   }
   var SECRET_ENV = ["openrouter_api_key"];
   function scrubbedEnv(env) {
@@ -277,6 +414,8 @@ ${host.nowMs()}`);
     }
     return clean;
   }
+  var MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+  var MAX_IMAGE_RESPONSE_BYTES = 512 * 1024 * 1024;
   function redact(message, env) {
     let text = message;
     for (const name of SECRET_ENV) {
@@ -363,16 +502,24 @@ ${host.nowMs()}`);
         fail("read", path);
       return ObjC.unwrap(text);
     }
-    readBytesFrom(path, offset) {
+    readBytesFrom(path, offset, maxLength = Infinity) {
+      if (maxLength <= 0)
+        return new Uint8Array(0);
       const handle = $.NSFileHandle.fileHandleForReadingAtPath(path);
       if (isNil(handle))
         fail("open", path);
       try {
         handle.seekToFileOffset(offset);
-        return bytesFromData(handle.readDataToEndOfFile);
+        return bytesFromData(Number.isFinite(maxLength) ? handle.readDataOfLength(maxLength) : handle.readDataToEndOfFile);
       } finally {
         handle.closeFile;
       }
+    }
+    readBase64(path) {
+      const data = $.NSData.dataWithContentsOfFile(path);
+      if (isNil(data))
+        fail("read", path);
+      return ObjC.unwrap(data.base64EncodedStringWithOptions(0));
     }
     writeAtomic(path, data) {
       const payload = typeof data === "string" ? nsString(data).dataUsingEncoding($.NSUTF8StringEncoding) : dataFromBytes(data);
@@ -436,6 +583,14 @@ ${host.nowMs()}`);
         isDirectory: ObjC.unwrap(attributes.objectForKey("NSFileType")) === "NSFileTypeDirectory"
       };
     }
+    changedMs(path) {
+      const key = $.NSURLAttributeModificationDateKey;
+      const values = $.NSURL.fileURLWithPath(path).resourceValuesForKeysError($.NSArray.arrayWithObject(key), $());
+      if (isNil(values))
+        return null;
+      const date = values.objectForKey(key);
+      return isNil(date) ? null : date.timeIntervalSince1970 * 1000;
+    }
     listDir(path) {
       const names = fileManager().contentsOfDirectoryAtPathError(path, $());
       if (isNil(names))
@@ -461,6 +616,7 @@ ${host.nowMs()}`);
       }
     }
     runSync(argv, options = {}) {
+      const command = options.maxBytes === undefined ? argv : boundedCommandArgv(argv, options.maxBytes);
       const folder = `${ObjC.unwrap($.NSTemporaryDirectory())}aichat-run-${this.randomId()}`;
       this.mkdirp(folder);
       const outPath = `${folder}/out`;
@@ -470,7 +626,7 @@ ${host.nowMs()}`);
       const out = $.NSFileHandle.fileHandleForWritingAtPath(outPath);
       const err = $.NSFileHandle.fileHandleForWritingAtPath(errPath);
       try {
-        const task = launch(argv, out, err, this.env, options.stdin);
+        const task = launch(command, out, err, this.env, options.stdin);
         const deadline = options.timeoutMs === undefined ? Infinity : Date.now() + options.timeoutMs;
         let timedOut = false;
         while (task.isRunning) {
@@ -485,6 +641,8 @@ ${host.nowMs()}`);
           task.waitUntilExit;
         out.closeFile;
         err.closeFile;
+        if (options.maxBytes !== undefined)
+          return boundedRunResult(this, outPath, errPath, timedOut ? 124 : task.terminationStatus, options.maxBytes);
         return {
           exit: timedOut ? 124 : task.terminationStatus,
           stdout: this.readText(outPath),
@@ -614,6 +772,7 @@ ${host.nowMs()}`);
     try {
       const data = dataDir(host);
       const cache = cacheDir(host);
+      expirePresetResult(host);
       const swept = host.stat(`${data}/${SWEPT_MARK}`);
       const fresh = swept !== null && host.nowMs() - swept.mtimeMs <= SWEEP_EVERY_MS;
       if (fresh && host.exists(`${data}/${PRIVATE_MARK}`))
@@ -633,6 +792,17 @@ ${host.nowMs()}`);
     } catch (error) {
       host.log(`maintenance failed: ${String(error)}`);
     }
+  }
+  var PRESET_RESULT_MAX_AGE_MS = 60 * 60 * 1000;
+  function expirePresetResult(host) {
+    const path = `${dataDir(host)}/last-preset.json`;
+    const info = host.stat(path);
+    if (info === null)
+      return false;
+    if (host.nowMs() - info.mtimeMs < PRESET_RESULT_MAX_AGE_MS)
+      return true;
+    host.remove(path);
+    return false;
   }
   function sweepRequests(host) {
     if (!host.exists(requestsDir(host)))

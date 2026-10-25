@@ -3,6 +3,9 @@ name: Release
 # Run it by hand (Actions, Release, Run workflow, branch main) when you want to release. It checks the code, picks the
 # next version, moves "## Unreleased" in CHANGELOG.md under it, commits that to main, and publishes a GitHub release
 # with the .alfredworkflow and that version's notes. Nothing runs on an ordinary push.
+#
+# Two jobs: build installs the dependencies and runs everything with a read-only token; publish installs and runs no
+# project code, and is the only one that can write to the repository, attest the package, and create the release.
 on:
   workflow_dispatch:
     inputs:
@@ -20,16 +23,20 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+permissions: {}
+
 jobs:
-  release:
+  build:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      contents: read
+    outputs:
+      tag: ${{ steps.bump.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: ".bun-version"
@@ -42,6 +49,7 @@ jobs:
       - name: Fail when the committed Workflow files are stale
         run: git diff --exit-code -- Workflow
       - name: Bump the version
+        id: bump
         env:
           BUMP: ${{ inputs.bump }}
         run: |
@@ -57,13 +65,47 @@ jobs:
             exit 1
           fi
           echo "RELEASE_TAG=v$version" >> "$GITHUB_ENV"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
       - run: bun run package
       - name: Write the release notes from the changelog
         run: bun run release:check "$RELEASE_TAG" --no-qa
       - name: Add the checksum to the release notes
         run: |
           (cd dist && sha256sum AI-Chat.alfredworkflow > AI-Chat.alfredworkflow.sha256)
-          printf '\n\n**SHA-256** of `AI-Chat.alfredworkflow`: `%s`\n\nThe package is reproducible: `bun run package` on this tag gives the same checksum.\n' "$(cut -d' ' -f1 dist/AI-Chat.alfredworkflow.sha256)" >> dist/notes.md
+          printf '\n\n**SHA-256** of `AI-Chat.alfredworkflow`: `%s`\n\nThe package is reproducible: `bun run package` on this tag gives the same checksum, and its build provenance can be checked with `gh attestation verify AI-Chat.alfredworkflow --repo Sillybit-io/silly-alfred-aichat`.\n' "$(cut -d' ' -f1 dist/AI-Chat.alfredworkflow.sha256)" >> dist/notes.md
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          if-no-files-found: error
+          retention-days: 1
+          path: |
+            dist/AI-Chat.alfredworkflow
+            dist/AI-Chat.alfredworkflow.sha256
+            dist/notes.md
+            package.json
+            CHANGELOG.md
+            Workflow/info.plist
+
+  publish:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ needs.build.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: .
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/AI-Chat.alfredworkflow
       - name: Commit the bump to main
         run: |
           git config user.name "github-actions[bot]"

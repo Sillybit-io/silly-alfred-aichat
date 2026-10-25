@@ -12,20 +12,25 @@ function rotr(x: number, n: number): number {
 }
 
 // SHA-256 of the bytes as lower-case hex; JavaScriptCore under osascript has no crypto module.
+// Whole blocks are read from the input itself; only the last partial block is copied to be padded.
 export function sha256Hex(bytes: Uint8Array): string {
   const length = bytes.length;
-  const padded = new Uint8Array(((length + 9 + 63) >> 6) << 6);
-  padded.set(bytes);
-  padded[length] = 0x80;
-  const bitsHigh = Math.floor(length / 0x20000000);
-  const bitsLow = (length << 3) >>> 0;
-  const view = new DataView(padded.buffer);
-  view.setUint32(padded.length - 8, bitsHigh);
-  view.setUint32(padded.length - 4, bitsLow);
+  const whole = length - (length % 64);
+  const tail = new Uint8Array(((length - whole + 9 + 63) >> 6) << 6);
+  tail.set(bytes.subarray(whole));
+  tail[length - whole] = 0x80;
+  const tailView = new DataView(tail.buffer);
+  tailView.setUint32(tail.length - 8, Math.floor(length / 0x20000000));
+  tailView.setUint32(tail.length - 4, (length << 3) >>> 0);
 
   const h = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
   const w = new Array<number>(64);
-  for (let offset = 0; offset < padded.length; offset += 64) {
+  const input = new DataView(bytes.buffer, bytes.byteOffset, whole);
+  const blocks = whole / 64 + tail.length / 64;
+  for (let block = 0; block < blocks; block++) {
+    const inTail = block * 64 >= whole;
+    const view = inTail ? tailView : input;
+    const offset = inTail ? block * 64 - whole : block * 64;
     for (let i = 0; i < 16; i++) w[i] = view.getUint32(offset + i * 4);
     for (let i = 16; i < 64; i++) {
       const s0 = rotr(w[i - 15]!, 7) ^ rotr(w[i - 15]!, 18) ^ (w[i - 15]! >>> 3);

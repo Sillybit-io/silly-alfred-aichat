@@ -1,4 +1,4 @@
-import { imageBody, imageMarkdown, imagePathsIn, parseImagePrompt } from "../core/imagegen";
+import { imageBody, imageMarkdown, imagePathsIn, openArgv, parseImagePrompt } from "../core/imagegen";
 import { apiBase } from "../core/payload";
 import { ImageSaveError, newestImage, saveImages } from "../store/images";
 import { mutateChat, NotFoundError } from "../store/chats";
@@ -81,8 +81,9 @@ const open: Command = {
   run(ctx) {
     const path = newestChatImage(ctx) ?? newestImage(ctx.host, ctx.config);
     if (path === null || !ctx.host.exists(path)) return { kind: "notice", text: "There is no image to open yet." };
-    ctx.host.runSync(["/usr/bin/open", path], { timeoutMs: 10000 });
-    return { kind: "notice", text: `Opened \`${path}\`.` };
+    const argv = openArgv(path);
+    ctx.host.runSync(argv, { timeoutMs: 10000 });
+    return { kind: "notice", text: argv.length > 2 ? `Showing \`${path}\` in Finder: an SVG can run scripts in a browser, so it is not opened for you.` : `Opened \`${path}\`.` };
   },
 };
 

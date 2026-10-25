@@ -68,10 +68,11 @@ describe("release check", () => {
   });
 
   test("bun run release:check v9.9.9 exits 1 naming the version mismatch", () => {
+    const before = readFileSync(join(root, "package.json"), "utf8");
     const run = Bun.spawnSync(["bun", "scripts/release-check.ts", "v9.9.9"], { cwd: root });
     expect(run.exitCode).toBe(1);
     expect(String(run.stderr)).toContain("Version mismatch");
     expect(String(run.stderr)).toContain("v9.9.9");
-    expect(readFileSync(join(root, "package.json"), "utf8")).toContain('"version": "0.1.0"');
+    expect(readFileSync(join(root, "package.json"), "utf8")).toBe(before);
   });
 });

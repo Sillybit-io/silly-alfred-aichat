@@ -137,12 +137,12 @@ export type PayloadContribution = {
   refuse?: string;
 };
 
+// Built on every streaming tick, so it carries nothing that costs a file read beyond the chat itself.
 export type FooterContext = {
   host: Host;
   config: Config;
   chat: Chat | null;
   modelId: string;
-  model: ModelRecord | null;
   record: RequestRecord | null;
 };
 

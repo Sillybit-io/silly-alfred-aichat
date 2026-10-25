@@ -13,12 +13,13 @@ export function maintained(host: Host): Host {
 }
 
 // Once per install: data written by an earlier version becomes private to the user, and the icon cache of a removed
-// feature goes. Then, at most hourly, leftover request folders are swept. Nothing here may stop the workflow, so a
+// feature goes. Every run, an expired preset reply goes. Then, at most hourly, leftover request folders are swept. Nothing here may stop the workflow, so a
 // failure is only logged.
 export function runMaintenance(host: Host): void {
   try {
     const data = dataDir(host);
     const cache = cacheDir(host);
+    expirePresetResult(host);
     const swept = host.stat(`${data}/${SWEPT_MARK}`);
     const fresh = swept !== null && host.nowMs() - swept.mtimeMs <= SWEEP_EVERY_MS;
     if (fresh && host.exists(`${data}/${PRIVATE_MARK}`)) return;
@@ -37,6 +38,20 @@ export function runMaintenance(host: Host): void {
   } catch (error) {
     host.log(`maintenance failed: ${String(error)}`);
   }
+}
+
+export const PRESET_RESULT_MAX_AGE_MS = 60 * 60 * 1000;
+
+// The last preset reply is kept so its view can copy it. It holds text the user selected, so once it is an hour old it
+// is never shown again and is deleted the next time any part of the workflow runs; this costs one stat, so it is checked
+// on every run rather than with the hourly sweep. Returns whether a reply was there and is still current.
+export function expirePresetResult(host: Host): boolean {
+  const path = `${dataDir(host)}/last-preset.json`;
+  const info = host.stat(path);
+  if (info === null) return false;
+  if (host.nowMs() - info.mtimeMs < PRESET_RESULT_MAX_AGE_MS) return true;
+  host.remove(path);
+  return false;
 }
 
 // What goes: a folder whose record is missing or unreadable, one already finalized, and one that no lane points to

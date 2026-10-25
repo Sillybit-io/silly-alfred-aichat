@@ -1,6 +1,6 @@
 import { chatUrl, buildBody, encodeBody, type PrivacyMode } from "../core/payload";
 import { cleanRewrite, MAX_REWRITE_INPUT, rewriteTurns } from "../core/web-query";
-import { CURL_STDIN_CONFIG, curlAuthConfig, curlBinary, curlProtocolArgs } from "../host/common";
+import { CURL_STDIN_CONFIG, curlAuthConfig, curlBinary, curlProtocolArgs, MAX_RESPONSE_BYTES } from "../host/common";
 import type { Host } from "../host/types";
 import { dataDir } from "./chats";
 import { REFERER } from "./requests";
@@ -36,6 +36,7 @@ export function standaloneMessage(host: Host, apiKey: string, privacy: PrivacyMo
         ...curlProtocolArgs(url),
         "--silent",
         "--connect-timeout", "5",
+        "--max-filesize", String(MAX_RESPONSE_BYTES),
         "--max-time", String(TIMEOUT_SECONDS),
         ...CURL_STDIN_CONFIG,
         "-H", "Content-Type: application/json",
@@ -44,8 +45,9 @@ export function standaloneMessage(host: Host, apiKey: string, privacy: PrivacyMo
         "--data-binary", `@${bodyFile}`,
         url,
       ],
-      { timeoutMs: (TIMEOUT_SECONDS + 2) * 1000, stdin: curlAuthConfig(apiKey) },
+      { timeoutMs: (TIMEOUT_SECONDS + 2) * 1000, stdin: curlAuthConfig(apiKey), maxBytes: MAX_RESPONSE_BYTES },
     );
+    if (run.exit === 63 || run.exit === 153) return fail(host, "reply too large");
     if (run.exit !== 0) return fail(host, run.exit === 124 ? "timed out" : `curl exit ${run.exit}`);
     const parsed = JSON.parse(run.stdout) as { choices?: { message?: { content?: unknown } }[]; error?: { message?: unknown } };
     const content = parsed.choices?.[0]?.message?.content;

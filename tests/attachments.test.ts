@@ -27,9 +27,9 @@ const model = (id: string) => models.find((m) => m.id === id)!;
 
 class SpyHost extends BunHost {
   reads: string[] = [];
-  readBytesFrom(path: string, offset: number) {
+  readBytesFrom(path: string, offset: number, maxLength?: number) {
     this.reads.push(path);
-    return super.readBytesFrom(path, offset);
+    return super.readBytesFrom(path, offset, maxLength);
   }
 }
 
@@ -187,6 +187,31 @@ describe("attaching files", () => {
     expect(pasted.added[0]!.kind).toBe("image");
     expect(attachBytes(env.host, env.config, env.chat.id, "x.pdf", pdfBytes).errors[0]).toContain("only images");
   });
+
+  test("a text file's name cannot end the tag it is quoted in", () => {
+    const env = fresh();
+    attachPaths(env.host, env.config, env.chat.id, [write(env.dir, 'a"><b>&.txt', "body")]);
+    const ctx = payloadContext(env, { modelId: "deepseek/deepseek-r2" });
+    const contribution = feature.payloadOptions!(ctx) as { turns: { content: string }[] };
+    expect(contribution.turns[0]!.content).toContain('<attached_file name="a&quot;&gt;&lt;b&gt;&amp;.txt">');
+  });
+
+  test("a resized snapshot holds the smaller copy, and an image part is the snapshot's own base64", () => {
+    const small = renderIcon();
+    const env = fresh({ image_max_edge: "1024" }, {
+      sips: (args) => {
+        if (args.includes("-g")) return { exit: 0, stdout: "pixelWidth: 3000\npixelHeight: 2000\n", stderr: "" };
+        writeFileSync(args[args.indexOf("--out") + 1]!, small);
+        return { exit: 0, stdout: "", stderr: "" };
+      },
+    });
+    const ref = attachPaths(env.host, env.config, env.chat.id, [write(env.dir, "big.png", Uint8Array.from([...png, 9]))]).added[0]!;
+    const snapshot = join(env.dir, "data", "chats", env.chat.id, ref.file);
+    expect(Buffer.from(readFileSync(snapshot)).equals(Buffer.from(small))).toBe(true);
+    const ctx = payloadContext(env, { modelId: "google/gemini-3-flash" });
+    const contribution = feature.payloadOptions!(ctx) as { turns: { attachments?: { base64: string }[] }[] };
+    expect(contribution.turns.at(-1)!.attachments![0]!.base64).toBe(Buffer.from(small).toString("base64"));
+  });
 });
 
 describe("history-wide modality checks", () => {
@@ -303,12 +328,12 @@ describe("attachment commands", () => {
   test("the footer counts waiting files", () => {
     const env = fresh();
     attachPaths(env.host, env.config, env.chat.id, [write(env.dir, "a.png", png)]);
-    const flags = feature.footerFlags!({ host: env.host, config: env.config, chat: getChat(env.host, env.chat.id), modelId: "m", model: null, record: null });
+    const flags = feature.footerFlags!({ host: env.host, config: env.config, chat: getChat(env.host, env.chat.id), modelId: "m", record: null });
     expect(flags).toEqual([expect.stringContaining("📎 1 waiting")]);
     mutateChat(env.host, env.chat.id, (chat) => {
       chat.settings.pdfEngine = "ocr";
     });
-    const withOcr = feature.footerFlags!({ host: env.host, config: env.config, chat: getChat(env.host, env.chat.id), modelId: "m", model: null, record: null });
+    const withOcr = feature.footerFlags!({ host: env.host, config: env.config, chat: getChat(env.host, env.chat.id), modelId: "m", record: null });
     expect(withOcr).toEqual(["pdf ocr", expect.stringContaining("📎 1 waiting")]);
   });
 });

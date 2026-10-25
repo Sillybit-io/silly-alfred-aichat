@@ -1,147 +1,6 @@
 #!/usr/bin/osascript -l JavaScript
 var __aichat_main;
 (() => {
-  // src/host/common.ts
-  var SUPERVISOR_SCRIPT = [
-    "umask 077",
-    "pid_file=$1; exit_file=$2; err_file=$3; remove_file=$4; shift 4",
-    "exec 3<&0",
-    '"$@" <&3 >/dev/null 2>"$err_file" &',
-    "child=$!",
-    "exec 3<&-",
-    'printf "%s" "$child" > "$pid_file.tmp" && mv "$pid_file.tmp" "$pid_file"',
-    'wait "$child"',
-    "status=$?",
-    '[ -n "$remove_file" ] && rm -f -- "$remove_file"',
-    'printf "%s" "$status" > "$exit_file.tmp" && mv "$exit_file.tmp" "$exit_file"'
-  ].join(`
-`);
-  function supervisorArgv(argv, files) {
-    if (argv.length === 0)
-      throw new Error("spawnSupervised needs a command");
-    return ["/bin/sh", "-c", SUPERVISOR_SCRIPT, "sh", files.pid, files.exit, files.stderr, files.remove ?? "", ...argv];
-  }
-  var SECRET_ENV = ["openrouter_api_key"];
-  function scrubbedEnv(env) {
-    const clean = {};
-    for (const [name, value] of Object.entries(env)) {
-      if (value !== undefined && SECRET_ENV.indexOf(name) < 0)
-        clean[name] = value;
-    }
-    return clean;
-  }
-  var BAD_KEY = /[\u0000-\u001f\u007f]/;
-  function keyProblem(apiKey) {
-    return BAD_KEY.test(apiKey) ? "The OpenRouter API key in the workflow's Configuration contains a line break or control character. Paste it again." : null;
-  }
-  function redact(message, env) {
-    let text = message;
-    for (const name of SECRET_ENV) {
-      const value = (env[name] ?? "").trim();
-      if (value.length >= 6)
-        text = text.split(value).join("[redacted]");
-    }
-    return text;
-  }
-  function psArgv(pid) {
-    return ["/bin/ps", "-ww", "-o", "command=", "-p", String(Math.trunc(pid))];
-  }
-  function commandFromPs(result) {
-    const text = result.stdout.trim();
-    return result.exit === 0 && text !== "" ? text : null;
-  }
-  function killArgv(pid) {
-    return ["/bin/kill", "-s", "TERM", String(Math.trunc(pid))];
-  }
-  function isSafePid(pid) {
-    return Number.isInteger(pid) && pid > 1;
-  }
-
-  // src/core/attachments.ts
-  var MAX_FILE_BYTES = 20 * 1024 * 1024;
-  var MAX_PENDING = 8;
-  var MAX_BODY_BYTES = 32 * 1024 * 1024;
-  var IMAGE_MIME = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif" };
-  function extensionOf(name) {
-    const dot = name.lastIndexOf(".");
-    return dot > 0 && dot < name.length - 1 ? name.slice(dot + 1).toLowerCase().replace(/[^a-z0-9]/g, "") : "";
-  }
-  function baseName(path) {
-    const slash = path.lastIndexOf("/");
-    return slash >= 0 ? path.slice(slash + 1) : path;
-  }
-  function classifyName(name) {
-    const ext = extensionOf(name);
-    const image = IMAGE_MIME[ext];
-    if (image)
-      return { kind: "image", ext: ext === "jpeg" ? "jpg" : ext, mime: image };
-    if (ext === "pdf")
-      return { kind: "file", ext, mime: "application/pdf" };
-    return { kind: "unknown", ext: ext === "" ? "txt" : ext, mime: "text/plain" };
-  }
-  function looksLikeText(bytes) {
-    const sample = Math.min(bytes.length, 8192);
-    for (let i = 0;i < sample; i++)
-      if (bytes[i] === 0)
-        return false;
-    return true;
-  }
-  function megabytes(bytes) {
-    return `${Number((bytes / (1024 * 1024)).toFixed(1))} MB`;
-  }
-
-  // src/core/base64.ts
-  var ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  var LOOKUP = (() => {
-    const table = new Array(128).fill(-1);
-    for (let i = 0;i < ALPHABET.length; i++)
-      table[ALPHABET.charCodeAt(i)] = i;
-    return table;
-  })();
-  function encodeBase64(bytes) {
-    const parts = [];
-    for (let i = 0;i < bytes.length; i += 3) {
-      const a = bytes[i];
-      const b = i + 1 < bytes.length ? bytes[i + 1] : 0;
-      const c = i + 2 < bytes.length ? bytes[i + 2] : 0;
-      const chunk = a << 16 | b << 8 | c;
-      parts.push(ALPHABET[chunk >> 18 & 63] + ALPHABET[chunk >> 12 & 63] + (i + 1 < bytes.length ? ALPHABET[chunk >> 6 & 63] : "=") + (i + 2 < bytes.length ? ALPHABET[chunk & 63] : "="));
-    }
-    return parts.join("");
-  }
-  function decodeBase64(text) {
-    const symbols = [];
-    for (let i = 0;i < text.length; i++) {
-      const code = text.charCodeAt(i);
-      if (code === 61)
-        break;
-      if (code === 10 || code === 13 || code === 32 || code === 9)
-        continue;
-      const value = code < 128 ? LOOKUP[code] : -1;
-      if (value < 0)
-        throw new Error(`invalid base64 character at ${i}`);
-      symbols.push(value);
-    }
-    if (symbols.length % 4 === 1)
-      throw new Error("invalid base64 length");
-    const out = new Uint8Array(Math.floor(symbols.length * 3 / 4));
-    let o = 0;
-    for (let i = 0;i < symbols.length; i += 4) {
-      const s0 = symbols[i];
-      const s1 = symbols[i + 1];
-      const s2 = i + 2 < symbols.length ? symbols[i + 2] : 0;
-      const s3 = i + 3 < symbols.length ? symbols[i + 3] : 0;
-      const chunk = s0 << 18 | s1 << 12 | s2 << 6 | s3;
-      if (o < out.length)
-        out[o++] = chunk >> 16 & 255;
-      if (o < out.length)
-        out[o++] = chunk >> 8 & 255;
-      if (o < out.length)
-        out[o++] = chunk & 255;
-    }
-    return out;
-  }
-
   // src/core/utf8.ts
   function continuation(bytes, index, low = 128, high = 191) {
     return index < bytes.length && bytes[index] >= low && bytes[index] <= high;
@@ -217,6 +76,115 @@ var __aichat_main;
     return parts.join("");
   }
 
+  // src/host/common.ts
+  var SUPERVISOR_SCRIPT = [
+    "umask 077",
+    "pid_file=$1; exit_file=$2; err_file=$3; remove_file=$4; max_blocks=$5; shift 5",
+    'if [ -n "$max_blocks" ]; then ulimit -f "$max_blocks" || exit 63; fi',
+    "exec 3<&0",
+    '"$@" <&3 >/dev/null 2>"$err_file" &',
+    "child=$!",
+    "exec 3<&-",
+    'printf "%s" "$child" > "$pid_file.tmp" && mv "$pid_file.tmp" "$pid_file"',
+    'wait "$child"',
+    "status=$?",
+    '[ -n "$remove_file" ] && rm -f -- "$remove_file"',
+    'printf "%s" "$status" > "$exit_file.tmp" && mv "$exit_file.tmp" "$exit_file"'
+  ].join(`
+`);
+  function supervisorArgv(argv, files) {
+    if (argv.length === 0)
+      throw new Error("spawnSupervised needs a command");
+    return ["/bin/sh", "-c", SUPERVISOR_SCRIPT, "sh", files.pid, files.exit, files.stderr, files.remove ?? "", maxBlocks(files.maxBytes), ...argv];
+  }
+  function maxBlocks(maxBytes) {
+    if (maxBytes !== undefined && (!Number.isSafeInteger(maxBytes) || maxBytes < 1))
+      throw new Error("maxBytes must be a positive safe integer");
+    return maxBytes === undefined ? "" : String(Math.ceil(maxBytes / 512) + 1);
+  }
+  function boundedCommandArgv(argv, maxBytes) {
+    if (argv.length === 0)
+      throw new Error("runSync needs a command");
+    return ["/bin/sh", "-c", 'umask 077; ulimit -f "$1" || exit 63; shift; exec "$@"', "sh", maxBlocks(maxBytes), ...argv];
+  }
+  function boundedRunResult(host, out, err, exit, maxBytes) {
+    const stdout = host.readBytesFrom(out, 0, maxBytes + 1);
+    const stderr = host.readBytesFrom(err, 0, maxBytes + 1);
+    if (stdout.length > maxBytes || stderr.length > maxBytes)
+      return { exit: 63, stdout: "", stderr: "" };
+    return { exit, stdout: decodeUtf8(stdout), stderr: decodeUtf8(stderr) };
+  }
+  var SECRET_ENV = ["openrouter_api_key"];
+  function scrubbedEnv(env) {
+    const clean = {};
+    for (const [name, value] of Object.entries(env)) {
+      if (value !== undefined && SECRET_ENV.indexOf(name) < 0)
+        clean[name] = value;
+    }
+    return clean;
+  }
+  var BAD_KEY = /[\u0000-\u001f\u007f]/;
+  function keyProblem(apiKey) {
+    return BAD_KEY.test(apiKey) ? "The OpenRouter API key in the workflow's Configuration contains a line break or control character. Paste it again." : null;
+  }
+  var MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+  var MAX_IMAGE_RESPONSE_BYTES = 512 * 1024 * 1024;
+  function redact(message, env) {
+    let text = message;
+    for (const name of SECRET_ENV) {
+      const value = (env[name] ?? "").trim();
+      if (value.length >= 6)
+        text = text.split(value).join("[redacted]");
+    }
+    return text;
+  }
+  function psArgv(pid) {
+    return ["/bin/ps", "-ww", "-o", "command=", "-p", String(Math.trunc(pid))];
+  }
+  function commandFromPs(result) {
+    const text = result.stdout.trim();
+    return result.exit === 0 && text !== "" ? text : null;
+  }
+  function killArgv(pid) {
+    return ["/bin/kill", "-s", "TERM", String(Math.trunc(pid))];
+  }
+  function isSafePid(pid) {
+    return Number.isInteger(pid) && pid > 1;
+  }
+
+  // src/core/attachments.ts
+  var MAX_FILE_BYTES = 20 * 1024 * 1024;
+  var MAX_PENDING = 8;
+  var MAX_BODY_BYTES = 32 * 1024 * 1024;
+  var IMAGE_MIME = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif" };
+  function extensionOf(name) {
+    const dot = name.lastIndexOf(".");
+    return dot > 0 && dot < name.length - 1 ? name.slice(dot + 1).toLowerCase().replace(/[^a-z0-9]/g, "") : "";
+  }
+  function baseName(path) {
+    const slash = path.lastIndexOf("/");
+    return slash >= 0 ? path.slice(slash + 1) : path;
+  }
+  function classifyName(name) {
+    const ext = extensionOf(name);
+    const image = IMAGE_MIME[ext];
+    if (image)
+      return { kind: "image", ext: ext === "jpeg" ? "jpg" : ext, mime: image };
+    if (ext === "pdf")
+      return { kind: "file", ext, mime: "application/pdf" };
+    return { kind: "unknown", ext: ext === "" ? "txt" : ext, mime: "text/plain" };
+  }
+  function looksLikeText(bytes) {
+    const sample = Math.min(bytes.length, 8192);
+    for (let i = 0;i < sample; i++)
+      if (bytes[i] === 0)
+        return false;
+    return true;
+  }
+  function megabytes(bytes) {
+    return `${Number((bytes / (1024 * 1024)).toFixed(1))} MB`;
+  }
+
   // src/core/sha256.ts
   var K = [
     1116352408,
@@ -289,17 +257,21 @@ var __aichat_main;
   }
   function sha256Hex(bytes) {
     const length = bytes.length;
-    const padded = new Uint8Array(length + 9 + 63 >> 6 << 6);
-    padded.set(bytes);
-    padded[length] = 128;
-    const bitsHigh = Math.floor(length / 536870912);
-    const bitsLow = length << 3 >>> 0;
-    const view = new DataView(padded.buffer);
-    view.setUint32(padded.length - 8, bitsHigh);
-    view.setUint32(padded.length - 4, bitsLow);
+    const whole = length - length % 64;
+    const tail = new Uint8Array(length - whole + 9 + 63 >> 6 << 6);
+    tail.set(bytes.subarray(whole));
+    tail[length - whole] = 128;
+    const tailView = new DataView(tail.buffer);
+    tailView.setUint32(tail.length - 8, Math.floor(length / 536870912));
+    tailView.setUint32(tail.length - 4, length << 3 >>> 0);
     const h = [1779033703, 3144134277, 1013904242, 2773480762, 1359893119, 2600822924, 528734635, 1541459225];
     const w = new Array(64);
-    for (let offset = 0;offset < padded.length; offset += 64) {
+    const input = new DataView(bytes.buffer, bytes.byteOffset, whole);
+    const blocks = whole / 64 + tail.length / 64;
+    for (let block = 0;block < blocks; block++) {
+      const inTail = block * 64 >= whole;
+      const view = inTail ? tailView : input;
+      const offset = inTail ? block * 64 - whole : block * 64;
       for (let i = 0;i < 16; i++)
         w[i] = view.getUint32(offset + i * 4);
       for (let i = 16;i < 64; i++) {
@@ -526,21 +498,31 @@ ${host.nowMs()}`);
     const temp = `${cacheDir(host)}/resize-${host.randomId()}.${classified.ext}`;
     try {
       const result = host.runSync(["/usr/bin/sips", "-Z", String(config.imageMaxEdge), path, "--out", temp], { timeoutMs: 30000 });
-      return result.exit === 0 && host.exists(temp) ? host.readBytesFrom(temp, 0) : null;
-    } catch {
-      return null;
-    } finally {
-      host.remove(temp);
-    }
+      if (result.exit === 0 && host.exists(temp))
+        return { bytes: host.readBytesFrom(temp, 0), temp };
+    } catch {}
+    host.remove(temp);
+    return null;
   }
   function snapshot(host, chatId, source) {
     const sha = sha256Hex(source.bytes);
     const file = `attachments/${sha}.${source.classified.ext}`;
     const dir = attachmentsDir(host, chatId);
-    host.mkdirExclusive(dir);
-    const target = `${dir}/${sha}.${source.classified.ext}`;
-    if (!host.exists(target))
-      host.writeAtomic(target, source.bytes);
+    try {
+      host.mkdirExclusive(dir);
+      const target = `${dir}/${sha}.${source.classified.ext}`;
+      if (!host.exists(target)) {
+        if (source.temp !== undefined) {
+          host.move(source.temp, target);
+          host.restrict(target);
+        } else {
+          host.writeAtomic(target, source.bytes);
+        }
+      }
+    } finally {
+      if (source.temp !== undefined)
+        host.remove(source.temp);
+    }
     return {
       name: source.name,
       kind: source.classified.kind === "unknown" ? "text" : source.classified.kind,
@@ -560,19 +542,16 @@ ${host.nowMs()}`);
     if (info.size > MAX_FILE_BYTES)
       return `${name}: ${megabytes(info.size)} is over the 20 MB per-file cap`;
     const classified = classifyName(name);
-    let bytes = host.readBytesFrom(path, 0);
+    const bytes = host.readBytesFrom(path, 0);
     if (classified.kind === "unknown") {
       if (bytes.length > config.textAttachmentMaxKb * 1024)
         return `${name}: text files are limited to ${config.textAttachmentMaxKb} KB`;
       if (!looksLikeText(bytes))
         return `${name}: this file type cannot be read; attach images, PDFs, or text files`;
-      decodeUtf8(bytes);
       return { name, bytes, classified: { kind: "unknown", ext: classified.ext, mime: "text/plain" } };
     }
     const smaller = downscaled(host, config, path, classified);
-    if (smaller)
-      bytes = smaller;
-    return { name, bytes, classified };
+    return smaller ? { name, bytes: smaller.bytes, classified, temp: smaller.temp } : { name, bytes, classified };
   }
   function attachPaths(host, config, chatId, paths) {
     const result = { added: [], errors: [] };
@@ -614,6 +593,74 @@ ${host.nowMs()}`);
   var CATALOG_MAX_AGE_MS = 6 * 60 * 60 * 1000;
   var RETRY_AFTER_FAILURE_MS = 10 * 60 * 1000;
   var STUCK_REFRESH_MS = 2 * 60 * 1000;
+
+  // src/core/base64.ts
+  var ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  var PAD = 61;
+  var CHUNK = 8190;
+  var CODES = Uint8Array.from(ALPHABET, (c) => c.charCodeAt(0));
+  var LOOKUP = (() => {
+    const table = new Int8Array(128).fill(-1);
+    for (let i = 0;i < ALPHABET.length; i++)
+      table[ALPHABET.charCodeAt(i)] = i;
+    return table;
+  })();
+  function ascii(codes) {
+    const parts = [];
+    for (let i = 0;i < codes.length; i += CHUNK)
+      parts.push(String.fromCharCode.apply(null, codes.subarray(i, i + CHUNK)));
+    return parts.join("");
+  }
+  function encodeBase64(bytes) {
+    const out = new Uint8Array(Math.ceil(bytes.length / 3) * 4);
+    let o = 0;
+    let i = 0;
+    for (;i + 2 < bytes.length; i += 3) {
+      const chunk = bytes[i] << 16 | bytes[i + 1] << 8 | bytes[i + 2];
+      out[o++] = CODES[chunk >> 18 & 63];
+      out[o++] = CODES[chunk >> 12 & 63];
+      out[o++] = CODES[chunk >> 6 & 63];
+      out[o++] = CODES[chunk & 63];
+    }
+    const rest = bytes.length - i;
+    if (rest > 0) {
+      const chunk = bytes[i] << 16 | (rest > 1 ? bytes[i + 1] << 8 : 0);
+      out[o++] = CODES[chunk >> 18 & 63];
+      out[o++] = CODES[chunk >> 12 & 63];
+      out[o++] = rest > 1 ? CODES[chunk >> 6 & 63] : PAD;
+      out[o++] = PAD;
+    }
+    return ascii(out);
+  }
+  function decodeBase64(text) {
+    const symbols = new Uint8Array(text.length);
+    let n = 0;
+    for (let i = 0;i < text.length; i++) {
+      const code = text.charCodeAt(i);
+      if (code === PAD)
+        break;
+      if (code === 10 || code === 13 || code === 32 || code === 9)
+        continue;
+      const value = code < 128 ? LOOKUP[code] : -1;
+      if (value < 0)
+        throw new Error(`invalid base64 character at ${i}`);
+      symbols[n++] = value;
+    }
+    if (n % 4 === 1)
+      throw new Error("invalid base64 length");
+    const out = new Uint8Array(Math.floor(n * 3 / 4));
+    let o = 0;
+    for (let i = 0;i < n; i += 4) {
+      const chunk = symbols[i] << 18 | symbols[i + 1] << 12 | (i + 2 < n ? symbols[i + 2] : 0) << 6 | (i + 3 < n ? symbols[i + 3] : 0);
+      if (o < out.length)
+        out[o++] = chunk >> 16 & 255;
+      if (o < out.length)
+        out[o++] = chunk >> 8 & 255;
+      if (o < out.length)
+        out[o++] = chunk & 255;
+    }
+    return out;
+  }
 
   // src/store/requests.ts
   var requestsDir = (host) => `${dataDir(host)}/requests`;
@@ -830,16 +877,24 @@ ${host.nowMs()}`);
         fail("read", path);
       return ObjC.unwrap(text);
     }
-    readBytesFrom(path, offset) {
+    readBytesFrom(path, offset, maxLength = Infinity) {
+      if (maxLength <= 0)
+        return new Uint8Array(0);
       const handle = $.NSFileHandle.fileHandleForReadingAtPath(path);
       if (isNil(handle))
         fail("open", path);
       try {
         handle.seekToFileOffset(offset);
-        return bytesFromData(handle.readDataToEndOfFile);
+        return bytesFromData(Number.isFinite(maxLength) ? handle.readDataOfLength(maxLength) : handle.readDataToEndOfFile);
       } finally {
         handle.closeFile;
       }
+    }
+    readBase64(path) {
+      const data = $.NSData.dataWithContentsOfFile(path);
+      if (isNil(data))
+        fail("read", path);
+      return ObjC.unwrap(data.base64EncodedStringWithOptions(0));
     }
     writeAtomic(path, data) {
       const payload = typeof data === "string" ? nsString(data).dataUsingEncoding($.NSUTF8StringEncoding) : dataFromBytes(data);
@@ -903,6 +958,14 @@ ${host.nowMs()}`);
         isDirectory: ObjC.unwrap(attributes.objectForKey("NSFileType")) === "NSFileTypeDirectory"
       };
     }
+    changedMs(path) {
+      const key = $.NSURLAttributeModificationDateKey;
+      const values = $.NSURL.fileURLWithPath(path).resourceValuesForKeysError($.NSArray.arrayWithObject(key), $());
+      if (isNil(values))
+        return null;
+      const date = values.objectForKey(key);
+      return isNil(date) ? null : date.timeIntervalSince1970 * 1000;
+    }
     listDir(path) {
       const names = fileManager().contentsOfDirectoryAtPathError(path, $());
       if (isNil(names))
@@ -928,6 +991,7 @@ ${host.nowMs()}`);
       }
     }
     runSync(argv, options = {}) {
+      const command = options.maxBytes === undefined ? argv : boundedCommandArgv(argv, options.maxBytes);
       const folder = `${ObjC.unwrap($.NSTemporaryDirectory())}aichat-run-${this.randomId()}`;
       this.mkdirp(folder);
       const outPath = `${folder}/out`;
@@ -937,7 +1001,7 @@ ${host.nowMs()}`);
       const out = $.NSFileHandle.fileHandleForWritingAtPath(outPath);
       const err = $.NSFileHandle.fileHandleForWritingAtPath(errPath);
       try {
-        const task = launch(argv, out, err, this.env, options.stdin);
+        const task = launch(command, out, err, this.env, options.stdin);
         const deadline = options.timeoutMs === undefined ? Infinity : Date.now() + options.timeoutMs;
         let timedOut = false;
         while (task.isRunning) {
@@ -952,6 +1016,8 @@ ${host.nowMs()}`);
           task.waitUntilExit;
         out.closeFile;
         err.closeFile;
+        if (options.maxBytes !== undefined)
+          return boundedRunResult(this, outPath, errPath, timedOut ? 124 : task.terminationStatus, options.maxBytes);
         return {
           exit: timedOut ? 124 : task.terminationStatus,
           stdout: this.readText(outPath),
@@ -1040,6 +1106,7 @@ ${host.nowMs()}`);
     try {
       const data = dataDir(host);
       const cache = cacheDir(host);
+      expirePresetResult(host);
       const swept = host.stat(`${data}/${SWEPT_MARK}`);
       const fresh = swept !== null && host.nowMs() - swept.mtimeMs <= SWEEP_EVERY_MS;
       if (fresh && host.exists(`${data}/${PRIVATE_MARK}`))
@@ -1059,6 +1126,17 @@ ${host.nowMs()}`);
     } catch (error) {
       host.log(`maintenance failed: ${String(error)}`);
     }
+  }
+  var PRESET_RESULT_MAX_AGE_MS = 60 * 60 * 1000;
+  function expirePresetResult(host) {
+    const path = `${dataDir(host)}/last-preset.json`;
+    const info = host.stat(path);
+    if (info === null)
+      return false;
+    if (host.nowMs() - info.mtimeMs < PRESET_RESULT_MAX_AGE_MS)
+      return true;
+    host.remove(path);
+    return false;
   }
   function sweepRequests(host) {
     if (!host.exists(requestsDir(host)))

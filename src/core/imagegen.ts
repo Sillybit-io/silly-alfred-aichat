@@ -84,6 +84,12 @@ export type DecodedImage = { bytes: Uint8Array; ext: string };
 
 export const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "svg"];
 
+// An SVG a model sent can hold scripts, and its default app is often a browser that runs them. The Text View shows it
+// as an image, where scripts never run; opening it is left to Finder.
+export function openArgv(path: string): string[] {
+  return /\.svg$/i.test(path) ? ["/usr/bin/open", "-R", path] : ["/usr/bin/open", path];
+}
+
 // Alfred's Text View takes the plain file path, spaces included, as the image source.
 export function markdownImage(path: string): string {
   return `![](${path})`;

@@ -20,7 +20,8 @@ export type ViewFrame = {
 export function viewJson(frame: ViewFrame): string {
   const view: Record<string, unknown> = {
     response: sanitizeMarkdown(frame.response, { imageRoots: frame.imageRoots ?? [] }),
-    footer: frame.footer,
+    // The footer can carry text a model wrote, such as a rewritten search; it stays one plain line.
+    footer: frame.footer.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim(),
     behaviour: { response: frame.mode, scroll: "end", inputfield: "select" },
     variables: { request_id: frame.requestId, view_stage: frame.stage },
   };

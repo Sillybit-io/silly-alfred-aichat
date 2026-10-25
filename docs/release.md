@@ -8,9 +8,13 @@ You release from GitHub: open **Actions → Release → Run workflow**, pick `ma
 2. **Bump.** The `bump` input picks the version. `auto` (the default) releases the version in `package.json` as it is if it was never released, and otherwise counts the patch up; `patch`, `minor`, and `major` count up from the current version.
 3. **Changelog.** `## Unreleased` in `CHANGELOG.md` becomes `## <version> — <date>`, with a fresh, empty `## Unreleased` above it. An empty `## Unreleased` stops the run, so write the notes there as you work.
 4. **Package.** It builds `AI-Chat.alfredworkflow` and writes the release notes from that version's changelog section and adds the package's SHA-256 to them. The `.sha256` file is attached to the release too. The package is reproducible, so anyone can rebuild it from the tag and compare.
-5. **Publish.** It commits `package.json`, `CHANGELOG.md`, and `Workflow/info.plist` to `main` as `release: v<version>`, then creates the tag and the GitHub release with the archive and the notes.
+5. **Publish.** A second job takes the archive, the notes, and the bumped files from the first. It records build provenance for the archive, commits `package.json`, `CHANGELOG.md`, and `Workflow/info.plist` to `main` as `release: v<version>`, then creates the tag and the GitHub release with the archive and the notes. Check a downloaded archive with `gh attestation verify AI-Chat.alfredworkflow --repo Sillybit-io/silly-alfred-aichat`.
 
-If a run fails before the commit, nothing changed. If it fails after the commit, run it again with `auto`: the version is already bumped, so it only publishes. If `main` protects pushes from `github-actions[bot]`, allow the bot, or the commit step fails.
+Steps 1 to 4 install the dependencies and run project code, so their job has a read-only token. Only the publish job can write to the repository, and it installs and runs nothing from the project.
+
+If the build job fails, nothing changed. The publish job records the provenance first, so if it fails after that (at the commit or the release), the attestation stays on GitHub for an archive that was never released. It only states that this workflow built those bytes from the commit the run started on, so it is harmless; run the workflow again. If the run failed before the commit, `main` is unchanged and the same version is picked again. If it failed after the commit, run it with `auto`: the version is already bumped, so it only publishes. If `main` protects pushes from `github-actions[bot]`, allow the bot, or the commit step fails.
+
+The attestation names the commit the run started on, not the `release: v<version>` commit: that commit only adds the version bump in `package.json`, `CHANGELOG.md`, and `Workflow/info.plist`, which the build job applied before it built the archive.
 
 ## Checking by hand (optional)
 

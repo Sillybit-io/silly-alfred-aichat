@@ -3651,7 +3651,7 @@ This workflow borrows the streaming Text View pattern from the OpenAI workflow b
           <key>required</key>
           <false/>
           <key>text</key>
-          <string>Name new chats automatically</string>
+          <string>Name new chats automatically with one small extra request (it carries the first message and reply)</string>
         </dict>
         <key>description</key>
         <string/>

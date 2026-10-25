@@ -64,9 +64,11 @@ export function main(host: Host, argv: string[]): string {
     const tail = host.readBytesFrom(`${root}/b.bin`, 250);
     const past = host.readBytesFrom(`${root}/b.bin`, 300);
     const all = host.readBytesFrom(`${root}/b.bin`, 0);
+    const base64 = host.readBase64(`${root}/b.bin`);
+    const capped = host.readBytesFrom(`${root}/b.bin`, 10, 4);
     return expect(
-      tail.length === 6 && tail[0] === 250 && tail[5] === 255 && past.length === 0 && all.length === 256 && all[255] === 255,
-      `tail ${tail.length} past ${past.length} all ${all.length}`,
+      tail.length === 6 && tail[0] === 250 && tail[5] === 255 && past.length === 0 && all.length === 256 && all[255] === 255 && base64.length === 344 && base64.endsWith("/w==") && capped.length === 4 && capped[0] === 10 && capped[3] === 13,
+      `tail ${tail.length} past ${past.length} all ${all.length} base64 ${base64.length} capped ${capped.length}`,
     );
   });
   check("writeAtomic replaces in place and never recreates a missing folder", () => {
@@ -93,6 +95,17 @@ export function main(host: Host, argv: string[]): string {
     const info = host.stat(`${root}/b.bin`);
     const names = host.listDir(root);
     return expect(info !== null && info.size === 256 && info.mtimeMs > 0 && names.indexOf("b.bin") >= 0 && host.stat(`${root}/nope`) === null, `stat ${JSON.stringify(info)}`);
+  });
+  check("changedMs moves when an extended attribute changes and the content does not", () => {
+    host.writeAtomic(`${root}/x.txt`, "x");
+    const before = host.changedMs(`${root}/x.txt`);
+    const mtime = host.stat(`${root}/x.txt`)?.mtimeMs;
+    host.sleepMs(50);
+    // On a Mac this is the gallery's own case; elsewhere a mode change moves ctime the same way.
+    if (host.exists("/usr/bin/xattr")) host.runSync(["/usr/bin/xattr", "-w", "com.apple.metadata:kMDItemDescription", "probe", `${root}/x.txt`]);
+    else host.runSync(["/bin/chmod", "640", `${root}/x.txt`]);
+    const after = host.changedMs(`${root}/x.txt`);
+    return expect(before !== null && after !== null && after > before && host.stat(`${root}/x.txt`)?.mtimeMs === mtime && host.changedMs(`${root}/nope`) === null, `before ${before} after ${after} mtime ${mtime}`);
   });
   check("remove", () => {
     host.writeAtomic(`${root}/r.txt`, "r");
@@ -124,6 +137,24 @@ export function main(host: Host, argv: string[]): string {
     if (echo.exit !== 3 || echo.stdout !== "out" || echo.stderr !== "err") return `got ${JSON.stringify(echo)}`;
     const slow = host.runSync(["/bin/sleep", "5"], { timeoutMs: 200 });
     return expect(slow.exit === 124, `timeout exit ${slow.exit}`);
+  });
+  check("bounded runSync caps stdout, stderr, and files written by the child", () => {
+    const options = { maxBytes: 4096, timeoutMs: 5000 };
+    const out = host.runSync(["/bin/sh", "-c", "exec /bin/dd if=/dev/zero bs=1024 count=16"], options);
+    const err = host.runSync(["/bin/sh", "-c", "exec /bin/dd if=/dev/zero bs=1024 count=16 1>&2"], options);
+    const path = `${root}/bounded.out`;
+    host.runSync(["/bin/sh", "-c", 'exec /bin/dd if=/dev/zero bs=1024 count=16 > "$1"', "sh", path], options);
+    const size = host.stat(path)?.size ?? 0;
+    const unicode = host.runSync(["/bin/sh", "-c", "printf 'ééé'"], { maxBytes: 4, timeoutMs: 5000 });
+    return expect(out.exit === 63 && err.exit === 63 && unicode.exit === 63 && size > 4096 && size <= 4608, `stdout ${out.exit}, stderr ${err.exit}, UTF-8 ${unicode.exit}, file ${size}`);
+  });
+  check("supervisor file-size limit works without ticks and records its signal exit", () => {
+    const files = { pid: `${root}/bounded.pid`, exit: `${root}/bounded.exit`, stderr: `${root}/bounded.err`, maxBytes: 4096 };
+    const out = `${root}/supervised.out`;
+    host.spawnSupervised(["/bin/sh", "-c", 'exec /bin/dd if=/dev/zero bs=1024 count=16 > "$1"', "sh", out], files);
+    if (!waitFor(host, files.exit, 5000)) return "exit file never appeared";
+    const size = host.stat(out)?.size ?? 0;
+    return expect(host.readText(files.exit) === "153" && size > 4096 && size <= 4608, `exit ${host.readText(files.exit)}, file ${size}`);
   });
   check("supervisor records pid and exit", () => {
     const ok = supervised(["/bin/sh", "-c", "exit 0"], "ok");

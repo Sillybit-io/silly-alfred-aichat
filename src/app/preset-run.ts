@@ -1,10 +1,10 @@
 import { getModel } from "../store/catalog";
-import { describeFailure } from "../core/errors";
+import { describeFailure, mapCurlExit } from "../core/errors";
 import { buildBody, chatUrl, encodeBody, type ContextTurn, type PayloadOptions } from "../core/payload";
 import { sanitizeMarkdown } from "../core/sanitize";
 import { fillPrompt, type Preset } from "../core/presets";
 import { readConfig, FALLBACK_MODEL, type Config } from "../features/index";
-import { CURL_STDIN_CONFIG, curlAuthConfig, curlBinary, curlProtocolArgs } from "../host/common";
+import { CURL_STDIN_CONFIG, curlAuthConfig, curlBinary, curlProtocolArgs, MAX_RESPONSE_BYTES } from "../host/common";
 import type { Host } from "../host/types";
 import { cacheDir } from "../store/chats";
 import { loadPresets } from "../store/presets";
@@ -67,6 +67,7 @@ function request(host: Host, config: Config, preset: Preset, prompt: string): Re
         "-D", `${folder}/headers`,
         "--silent", "--show-error",
         "--connect-timeout", "15",
+        "--max-filesize", String(MAX_RESPONSE_BYTES),
         "--max-time", String(MAX_TIME_SECONDS),
         ...CURL_STDIN_CONFIG,
         "-H", "Content-Type: application/json",
@@ -75,8 +76,13 @@ function request(host: Host, config: Config, preset: Preset, prompt: string): Re
         "--data-binary", `@${folder}/body.json`,
         url,
       ],
-      { timeoutMs: (MAX_TIME_SECONDS + 15) * 1000, stdin: curlAuthConfig(config.apiKey) },
+      { timeoutMs: (MAX_TIME_SECONDS + 15) * 1000, stdin: curlAuthConfig(config.apiKey), maxBytes: MAX_RESPONSE_BYTES },
     );
+    // A reply over the cap is never loaded; curl before 8.4.0 does not stop one whose length was not announced.
+    if ((host.stat(`${folder}/out`)?.size ?? 0) > MAX_RESPONSE_BYTES) {
+      const mapped = mapCurlExit(63);
+      return { ok: false, message: failureText(mapped.title, mapped.detail, mapped.next) };
+    }
     const read = (name: string) => (host.exists(`${folder}/${name}`) ? host.readText(`${folder}/${name}`) : "");
     const body = read("out");
     const headers = read("headers");

@@ -1,9 +1,12 @@
 export type FileStat = { size: number; mtimeMs: number; isDirectory: boolean };
 
 export type RunResult = { exit: number; stdout: string; stderr: string };
+// maxBytes limits each file written by the child and bounds stdout/stderr reads before decoding.
+export type RunOptions = { timeoutMs?: number; stdin?: string; maxBytes?: number };
 
 // remove is a file the supervisor deletes as soon as the command ends: the request body, which holds the conversation.
-export type SupervisorFiles = { pid: string; exit: string; stderr: string; remove?: string };
+// maxBytes caps every file the command writes (ulimit -f); one that writes past it is stopped by the system.
+export type SupervisorFiles = { pid: string; exit: string; stderr: string; remove?: string; maxBytes?: number };
 
 export type ChooseFilesOptions = { prompt?: string; multiple?: boolean };
 
@@ -16,8 +19,10 @@ export interface Host {
   env: Record<string, string | undefined>;
 
   readText(path: string): string;
-  // Bytes from offset to the end of the file; empty when the file is shorter.
-  readBytesFrom(path: string, offset: number): Uint8Array;
+  // Bytes from offset to the end of the file, or at most maxLength of them; empty when the file is shorter.
+  readBytesFrom(path: string, offset: number, maxLength?: number): Uint8Array;
+  // The whole file as base64, encoded natively, for bytes that only travel in a request body.
+  readBase64(path: string): string;
   // Everything the host creates is private to the user: folders 0700, files 0600.
   // Replaces the file in place through a temp file in its folder; fails when the folder is missing.
   writeAtomic(path: string, data: Uint8Array | string): void;
@@ -33,6 +38,8 @@ export interface Host {
   restrict(path: string): void;
   exists(path: string): boolean;
   stat(path: string): FileStat | null;
+  // When the file's content or metadata (extended attributes, permissions) last changed, as ctime; null when unknown.
+  changedMs(path: string): number | null;
   listDir(path: string): string[];
 
   // Runs argv under the sh supervisor: pid, then exit status, written atomically to the given files.
@@ -42,8 +49,8 @@ export interface Host {
   processCommand(pid: number): string | null;
   // TERM through /bin/kill; false when nothing was signalled.
   signalTerm(pid: number): boolean;
-  // Exit 124 means the timeout fired.
-  runSync(argv: string[], options?: { timeoutMs?: number; stdin?: string }): RunResult;
+  // Exit 124 means the timeout fired; 63 means captured output exceeded maxBytes.
+  runSync(argv: string[], options?: RunOptions): RunResult;
 
   nowMs(): number;
   sleepMs(ms: number): void;

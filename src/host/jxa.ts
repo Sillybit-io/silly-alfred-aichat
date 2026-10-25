@@ -1,6 +1,6 @@
 import { decodeBase64, encodeBase64 } from "../core/base64";
-import { commandFromPs, isSafePid, killArgv, psArgv, redact, scrubbedEnv, supervisorArgv } from "./common";
-import type { ChooseFilesOptions, ChooseFilesResult, FileStat, Host, RunResult, SupervisorFiles } from "./types";
+import { boundedCommandArgv, boundedRunResult, commandFromPs, isSafePid, killArgv, psArgv, redact, scrubbedEnv, supervisorArgv } from "./common";
+import type { ChooseFilesOptions, ChooseFilesResult, FileStat, Host, RunOptions, RunResult, SupervisorFiles } from "./types";
 
 // The ObjC bridge hands back wrapped objects; a nil result arrives as undefined or null once unwrapped.
 function isNil(value: any): boolean {
@@ -81,15 +81,22 @@ class JxaHost implements Host {
     return ObjC.unwrap(text);
   }
 
-  readBytesFrom(path: string, offset: number): Uint8Array {
+  readBytesFrom(path: string, offset: number, maxLength = Infinity): Uint8Array {
+    if (maxLength <= 0) return new Uint8Array(0);
     const handle = $.NSFileHandle.fileHandleForReadingAtPath(path);
     if (isNil(handle)) fail("open", path);
     try {
       handle.seekToFileOffset(offset);
-      return bytesFromData(handle.readDataToEndOfFile);
+      return bytesFromData(Number.isFinite(maxLength) ? handle.readDataOfLength(maxLength) : handle.readDataToEndOfFile);
     } finally {
       handle.closeFile;
     }
+  }
+
+  readBase64(path: string): string {
+    const data = $.NSData.dataWithContentsOfFile(path);
+    if (isNil(data)) fail("read", path);
+    return ObjC.unwrap(data.base64EncodedStringWithOptions(0));
   }
 
   writeAtomic(path: string, data: Uint8Array | string): void {
@@ -149,6 +156,15 @@ class JxaHost implements Host {
     };
   }
 
+  // NSURLAttributeModificationDateKey is st_ctime; NSFileManager's attributes do not carry it.
+  changedMs(path: string): number | null {
+    const key = $.NSURLAttributeModificationDateKey;
+    const values = $.NSURL.fileURLWithPath(path).resourceValuesForKeysError($.NSArray.arrayWithObject(key), $());
+    if (isNil(values)) return null;
+    const date = values.objectForKey(key);
+    return isNil(date) ? null : date.timeIntervalSince1970 * 1000;
+  }
+
   listDir(path: string): string[] {
     const names = fileManager().contentsOfDirectoryAtPathError(path, $());
     if (isNil(names)) fail("list", path);
@@ -175,7 +191,8 @@ class JxaHost implements Host {
   }
 
   // Output goes through files so a chatty child can never fill a pipe nobody is reading.
-  runSync(argv: string[], options: { timeoutMs?: number; stdin?: string } = {}): RunResult {
+  runSync(argv: string[], options: RunOptions = {}): RunResult {
+    const command = options.maxBytes === undefined ? argv : boundedCommandArgv(argv, options.maxBytes);
     const folder = `${ObjC.unwrap($.NSTemporaryDirectory())}aichat-run-${this.randomId()}`;
     this.mkdirp(folder);
     const outPath = `${folder}/out`;
@@ -185,7 +202,7 @@ class JxaHost implements Host {
     const out = $.NSFileHandle.fileHandleForWritingAtPath(outPath);
     const err = $.NSFileHandle.fileHandleForWritingAtPath(errPath);
     try {
-      const task = launch(argv, out, err, this.env, options.stdin);
+      const task = launch(command, out, err, this.env, options.stdin);
       const deadline = options.timeoutMs === undefined ? Infinity : Date.now() + options.timeoutMs;
       let timedOut = false;
       while (task.isRunning) {
@@ -199,6 +216,7 @@ class JxaHost implements Host {
       if (!timedOut) task.waitUntilExit;
       out.closeFile;
       err.closeFile;
+      if (options.maxBytes !== undefined) return boundedRunResult(this, outPath, errPath, timedOut ? 124 : task.terminationStatus, options.maxBytes);
       return {
         exit: timedOut ? 124 : task.terminationStatus,
         stdout: this.readText(outPath),

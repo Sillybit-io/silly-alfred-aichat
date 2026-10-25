@@ -50,7 +50,7 @@ Chats, presets, and attachments are plain, unencrypted files in the workflow's d
 
 Deleting a chat (⌃↩ in the lists, after a confirmation) or letting retention remove one erases its folder at once. It does not go to the Trash. That is not a secure erase: macOS has no secure erase for flash storage (Apple removed Secure Empty Trash for that reason), and FileVault is what keeps deleted data unreadable.
 
-Your API key is stored by Alfred in the workflow's preferences, unencrypted, like every Alfred workflow setting. The workflow leaves it out of exported copies and of the packaged release, and gives it to `curl` on standard input so it never appears in a command line. The workflow has no analytics and never downloads code.
+Your API key is stored by Alfred in the workflow's preferences, unencrypted, like every Alfred workflow setting. When Alfred's preferences are synced (Alfred Preferences, Advanced, Syncing), they live in the folder you chose, such as iCloud Drive or Dropbox, and the key travels with them. Give the workflow its own key with a credit limit on openrouter.ai/keys, so a copied key can spend little. The workflow leaves it out of exported copies and of the packaged release, and gives it to `curl` on standard input so it never appears in a command line. The workflow has no analytics and never downloads code.
 
 ## What leaves my Mac?
 

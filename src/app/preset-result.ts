@@ -1,5 +1,6 @@
 import type { Host } from "../host/types";
 import { dataDir } from "../store/chats";
+import { expirePresetResult } from "../store/maintenance";
 
 export type LastResult = { name: string; reply: string };
 
@@ -12,6 +13,7 @@ export function saveLastResult(host: Host, name: string, reply: string): void {
 
 export function loadLastResult(host: Host): LastResult | null {
   try {
+    if (!expirePresetResult(host)) return null;
     const parsed = JSON.parse(host.readText(path(host))) as Partial<LastResult>;
     return typeof parsed.reply === "string" ? { name: typeof parsed.name === "string" ? parsed.name : "Preset", reply: parsed.reply } : null;
   } catch {

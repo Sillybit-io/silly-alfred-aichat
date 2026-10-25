@@ -2,6 +2,7 @@ import { decodeBase64 } from "../core/base64";
 import { IMAGE_EXTENSIONS, imageExtension, promptFromXattr, xattrPlist, type DecodedImage } from "../core/imagegen";
 import type { Config } from "../features/index";
 import type { Host } from "../host/types";
+import { cacheDir } from "./chats";
 
 const XATTR_FIELD = "com.apple.metadata:kMDItemDescription";
 
@@ -68,18 +69,23 @@ export function saveImages(host: Host, config: Config, bodyText: string, prompt:
 
 export type SavedImage = { path: string; prompt: string; mtimeMs: number };
 
-function promptOf(host: Host, path: string): string {
+// Nonzero exits are ambiguous (missing attributes and I/O failures both exit 1), so retry them next time.
+function promptOf(host: Host, path: string): string | null {
   try {
     const result = host.runSync(["/usr/bin/xattr", "-p", XATTR_FIELD, path], { timeoutMs: 5000 });
-    return result.exit === 0 ? promptFromXattr(result.stdout) : "";
+    return result.exit === 0 ? promptFromXattr(result.stdout) : null;
   } catch {
-    return "";
+    return null;
   }
 }
 
 export function listImages(host: Host, config: Config, limit: number): SavedImage[] {
   const folder = imagesFolder(host, config);
-  if (!host.exists(folder)) return [];
+  if (!host.exists(folder)) {
+    // The prompts it held go with the folder.
+    forgetPromptCache(host);
+    return [];
+  }
   const found: SavedImage[] = [];
   for (const name of host.listDir(folder)) {
     const dot = name.lastIndexOf(".");
@@ -89,8 +95,54 @@ export function listImages(host: Host, config: Config, limit: number): SavedImag
   }
   found.sort((a, b) => b.mtimeMs - a.mtimeMs || (a.path < b.path ? 1 : -1));
   const newest = found.slice(0, limit);
-  for (const image of newest) image.prompt = promptOf(host, image.path);
+  const cached = loadPromptCache(host);
+  const fresh: PromptCache = {};
+  for (const image of newest) {
+    const changedMs = host.changedMs(image.path);
+    const hit = cached[image.path];
+    if (changedMs !== null && hit && hit.changedMs === changedMs && typeof hit.prompt === "string") {
+      image.prompt = hit.prompt;
+      fresh[image.path] = hit;
+      continue;
+    }
+    const prompt = promptOf(host, image.path);
+    image.prompt = prompt ?? "";
+    if (prompt !== null && changedMs !== null) fresh[image.path] = { changedMs, prompt };
+  }
+  if (JSON.stringify(fresh) !== JSON.stringify(cached)) savePromptCache(host, fresh);
   return newest;
+}
+
+// The prompts of the gallery's images, so showing it does not run xattr once per image every time. A prompt is an
+// extended attribute, and writing or removing one changes the file's ctime but not its mtime, so ctime is the key.
+type PromptCache = Record<string, { changedMs: number; prompt: string }>;
+
+function forgetPromptCache(host: Host): void {
+  try {
+    host.remove(promptCacheFile(host));
+  } catch {
+    // removed next time
+  }
+}
+
+const promptCacheFile = (host: Host) => `${cacheDir(host)}/image-prompts.json`;
+
+function loadPromptCache(host: Host): PromptCache {
+  try {
+    const parsed = JSON.parse(host.readText(promptCacheFile(host))) as unknown;
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? (parsed as PromptCache) : {};
+  } catch {
+    return {};
+  }
+}
+
+function savePromptCache(host: Host, cache: PromptCache): void {
+  try {
+    host.mkdirp(cacheDir(host));
+    host.writeAtomic(promptCacheFile(host), JSON.stringify(cache));
+  } catch {
+    // the prompts are read again next time
+  }
 }
 
 export function newestImage(host: Host, config: Config): string | null {

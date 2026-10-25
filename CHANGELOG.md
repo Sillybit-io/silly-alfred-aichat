@@ -1,5 +1,20 @@
 ## Unreleased
 
+**Faster**
+
+- A streaming reply no longer starts a `ps` process or reads the whole model list on every update, and its saved state is written only when something arrived.
+- Images and PDFs reach the request without passing through JavaScript, and attaching a large file uses far less memory.
+- The chat lists read only the chats that changed since the last keystroke, and the image gallery no longer runs `xattr` once per picture each time.
+
+**Security and privacy**
+
+- Responses are capped in size (32 MB, 512 MB for images) on every supported macOS, also while the chat window is closed, and need TLS 1.2 or newer.
+- An SVG from an image model is shown in Finder instead of opened, because its default app can run the scripts it holds.
+- The last preset reply is no longer shown after an hour, and is deleted the next time the workflow runs after that.
+- Attached file names cannot break out of the text they are quoted in, the footer is always one plain line, and history actions accept only real chat ids.
+- The Titles setting says it sends the first message and reply, and the README and FAQ say that a synced Alfred preferences folder syncs the API key too.
+- Releases are built in a job that cannot write to the repository, and the package carries build provenance that `gh attestation verify` checks.
+
 ## 0.1.1 — 2026-10-24
 
 **Security and privacy**

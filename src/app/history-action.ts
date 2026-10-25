@@ -1,16 +1,19 @@
 import type { Host } from "../host/types";
 import { baseName } from "../core/attachments";
-import { chatDir, clearCurrent, getChat, getCurrent, mutateChat, NotFoundError, setCurrent } from "../store/chats";
+import { chatDir, clearCurrent, forgetSummary, getChat, getCurrent, mutateChat, NotFoundError, setCurrent } from "../store/chats";
 import { envelope } from "./view";
 
 export type HistoryOutcome = { next: "view" | "list"; notice: string };
+
+const CHAT_ID = /^[0-9a-z]{1,64}$/;
 
 // Applies one action to the chat folder an item pointed at. Every write takes the chat's lock, and a chat
 // that is gone is reported, never recreated.
 export function applyHistoryAction(host: Host, action: string, folderArg: string): HistoryOutcome {
   const id = baseName(folderArg.trim().replace(/\/+$/, ""));
   const gone: HistoryOutcome = { next: "list", notice: "That chat no longer exists" };
-  if (id === "" || !getChat(host, id)) return gone;
+  // Chat ids are lower-case letters and digits; anything else never names a chat folder.
+  if (!CHAT_ID.test(id) || !getChat(host, id)) return gone;
   try {
     if (action === "archive") {
       mutateChat(host, id, (chat) => {
@@ -34,6 +37,7 @@ export function applyHistoryAction(host: Host, action: string, folderArg: string
         host.log(`could not delete chat ${id}: ${String(error)}`);
         return { next: "list", notice: "The chat could not be deleted" };
       }
+      forgetSummary(host, id);
       if (getCurrent(host) === id) clearCurrent(host);
       return { next: "list", notice: "" };
     }
